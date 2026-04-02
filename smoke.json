@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "created_unix": 1775088899,
+  "roots": [
+    "C:\\Users\\mathe\\scripts\\rm-folders\\src"
+  ],
+  "match_dirs": [
+    "node_modules",
+    "target"
+  ],
+  "skip_dirs": [
+    ".git",
+    ".hg",
+    ".svn",
+    "System Volume Information",
+    "$RECYCLE.BIN",
+    ".zig-cache",
+    "zig-out"
+  ],
+  "total_bytes": 0,
+  "entries": [],
+  "hash": "18c3c116fe513af0"
+}
