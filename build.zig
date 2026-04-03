@@ -16,6 +16,10 @@ pub fn build(b: *std.Build) void {
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
+    const test_runner: std.Build.Step.Compile.TestRunner = .{
+        .path = b.path("src/test_runner.zig"),
+        .mode = .simple,
+    };
     // It's also possible to define more custom flags to toggle optional features
     // of this build script using `b.option()`. All defined flags (including
     // target and optimize options) will be listed when running `zig build --help`
@@ -119,6 +123,7 @@ pub fn build(b: *std.Build) void {
     // set the releative field.
     const mod_tests = b.addTest(.{
         .root_module = mod,
+        .test_runner = test_runner,
     });
 
     // A run step that will run the test executable.
@@ -129,6 +134,7 @@ pub fn build(b: *std.Build) void {
     // hence why we have to create two separate ones.
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
+        .test_runner = test_runner,
     });
 
     // A run step that will run the second test executable.
