@@ -9,7 +9,7 @@ Fluxo atual:
 1. Descobrir diretorios candidatos (match/skip).
 2. Opcionalmente calcular tamanho (`--with-size`).
 3. Mostrar lista.
-4. Prompt interativo (`y`, `n`, `y-all`) para remover.
+4. Prompt interativo com modo inicial (`all|none|each`) e, se `each`, selecao por item (`y`, `n`, `y-all`).
 
 Nao existe mais modo separado `scan/apply` para uso normal do CLI. O fluxo principal e direto/interativo.
 
@@ -94,6 +94,11 @@ Quando usado, regras padrao embutidas nao sao carregadas; voce define tudo por f
 
 Durante a remocao:
 
+- Escolha inicial:
+- `all`/`a`: remove todos os candidatos listados.
+- `none`/`n`: nao remove nada.
+- `each`/`e`: pergunta item por item.
+- No modo `each`:
 - `y`: remove item atual
 - `n`: pula item atual
 - `y-all`: remove item atual e todos os restantes

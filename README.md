@@ -37,8 +37,10 @@ zig build run --
 zig build run -- --dir C:\Users\mathe\projetos
 ```
 
-Atalhos do prompt:
+Fluxo do prompt de remocao:
 
+- Primeiro pergunta modo: `all/a`, `none/n`, `each/e`.
+- Em `each`:
 - `y` => apaga item atual
 - `n` => pula item atual
 - `y-all` => apaga item atual e todos os restantes
@@ -64,8 +66,11 @@ Modo de calculo (`--size-mode`):
 - `--dir <path>` ou `--path <path>`: diretorio alvo do scan.
 - `--match-dir <nome>`: nomes de pasta para procurar.
 - `--skip-dir <nome>`: nomes de pasta para ignorar.
-- `--no-default-rules`: nao carregar regras padrao embutidas.`n- `--skip-path-regex <pattern>`: excluir por regex-lite de caminho (suporta `.*`).`n- `--no-skip-dot-dirs`: permite entrar em pastas que comecam com ponto.
+- `--no-default-rules`: nao carregar regras padrao embutidas.
+- `--skip-path-regex <pattern>`: excluir por regex-lite de caminho (suporta `.*`).
+- `--no-skip-dot-dirs`: permite entrar em pastas que comecam com ponto.
 - `--workers auto|N`
+- `--delete-workers auto|N`
 - `--with-size`
 - `--size-mode <approx|exact|hybrid>`
 - `--no-progress`

@@ -21,6 +21,7 @@ pub const ScanOptions = struct {
     snapshot_explicit: bool,
     no_snapshot: bool,
     workers: usize,
+    delete_workers: usize,
     progress: bool,
     with_size: bool,
     size_mode: SizeMode,
@@ -74,6 +75,7 @@ pub fn printUsage(writer: anytype) !void {
         \\      (default: scan + interactive delete prompt)
         \\      [--no-default-rules]
         \\      [--skip-path-regex <pattern>] [--no-skip-dot-dirs]
+        \\      [--workers auto|N] [--delete-workers auto|N]
         \\      [--with-size] [--size-mode approx|exact|hybrid]
         \\
     , .{});
@@ -109,6 +111,7 @@ fn parseScan(allocator: std.mem.Allocator, raw: []const []const u8) !ScanOptions
     errdefer if (snapshot_path) |p| allocator.free(p);
 
     var workers: usize = defaultWorkers();
+    var delete_workers: usize = defaultDeleteWorkers();
     var progress = true;
     var with_size = false;
     var size_mode: SizeMode = .approx;
@@ -161,6 +164,17 @@ fn parseScan(allocator: std.mem.Allocator, raw: []const []const u8) !ScanOptions
             }
             continue;
         }
+        if (std.mem.eql(u8, arg, "--delete-workers")) {
+            i += 1;
+            if (i >= raw.len) return error.MissingValue;
+            if (std.mem.eql(u8, raw[i], "auto")) {
+                delete_workers = defaultDeleteWorkers();
+            } else {
+                delete_workers = try std.fmt.parseInt(usize, raw[i], 10);
+                delete_workers = @max(@as(usize, 1), @min(delete_workers, @as(usize, 32)));
+            }
+            continue;
+        }
         if (std.mem.eql(u8, arg, "--snapshot")) {
             i += 1;
             if (i >= raw.len) return error.MissingValue;
@@ -206,6 +220,7 @@ fn parseScan(allocator: std.mem.Allocator, raw: []const []const u8) !ScanOptions
         .snapshot_explicit = snapshot_explicit,
         .no_snapshot = no_snapshot,
         .workers = workers,
+        .delete_workers = delete_workers,
         .progress = progress,
         .with_size = with_size,
         .size_mode = size_mode,
@@ -259,6 +274,17 @@ fn parseInteractive(allocator: std.mem.Allocator, raw: []const []const u8) !Scan
             } else {
                 opts.workers = try std.fmt.parseInt(usize, raw[i], 10);
                 opts.workers = @max(@as(usize, 1), @min(opts.workers, @as(usize, 128)));
+            }
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--delete-workers")) {
+            i += 1;
+            if (i >= raw.len) return error.MissingValue;
+            if (std.mem.eql(u8, raw[i], "auto")) {
+                opts.delete_workers = defaultDeleteWorkers();
+            } else {
+                opts.delete_workers = try std.fmt.parseInt(usize, raw[i], 10);
+                opts.delete_workers = @max(@as(usize, 1), @min(opts.delete_workers, @as(usize, 32)));
             }
             continue;
         }
@@ -372,6 +398,11 @@ fn defaultWorkers() usize {
     return @max(@as(usize, 1), @min(cpu, @as(usize, 32)));
 }
 
+fn defaultDeleteWorkers() usize {
+    if (builtin.os.tag == .windows) return 2;
+    return 4;
+}
+
 fn canonicalizePath(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
     return try std.fs.cwd().realpathAlloc(allocator, path);
 }
@@ -423,6 +454,7 @@ test "parse scan with defaults" {
             try std.testing.expect(scan.match_dirs.len >= 2);
             try std.testing.expect(scan.skip_dirs.len >= 3);
             try std.testing.expect(scan.workers >= 1);
+            try std.testing.expect(scan.delete_workers >= 1);
             try std.testing.expect(scan.progress);
             try std.testing.expect(!scan.with_size);
             try std.testing.expect(scan.size_mode == .approx);
@@ -517,6 +549,25 @@ test "parse with-size and explicit size-mode" {
         .interactive => |scan| {
             try std.testing.expect(scan.with_size);
             try std.testing.expect(scan.size_mode == .exact);
+        },
+    }
+}
+
+test "parse explicit delete-workers" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{
+        "rm-folders",
+        "--dir",
+        ".",
+        "--delete-workers",
+        "7",
+    };
+    var cmd = try parseArgs(allocator, &args);
+    defer cmd.deinit(allocator);
+
+    switch (cmd) {
+        .interactive => |scan| {
+            try std.testing.expectEqual(@as(usize, 7), scan.delete_workers);
         },
     }
 }

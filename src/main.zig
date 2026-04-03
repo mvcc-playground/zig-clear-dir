@@ -96,37 +96,14 @@ fn runScanAndInteractiveDelete(
 
     if (!interactive or result.entries.len == 0) return;
 
-    try stdout.print("\nInteractive delete: y = delete current, n = skip current, y-all = delete current and all remaining\n", .{});
+    try stdout.print(
+        "\nDelete mode: all/a = delete all, none/n = delete none, each/e = choose one by one\n",
+        .{},
+    );
     try stdout.flush();
 
-    var selected = std.ArrayListUnmanaged(rm.snapshot.SnapshotEntry).empty;
+    var selected = try selectEntriesInteractive(allocator, stdout, result.entries);
     defer selected.deinit(allocator);
-
-    var all_remaining = false;
-    for (result.entries, 0..) |entry, idx| {
-        if (all_remaining) {
-            try selected.append(allocator, .{ .path = entry.path, .bytes = entry.bytes });
-            continue;
-        }
-
-        while (true) {
-            try stdout.print("[{d}/{d}] {s} -> delete? (y/n/y-all): ", .{ idx + 1, result.entries.len, entry.path });
-            try stdout.flush();
-
-            const choice = try readChoice();
-            if (choice == .yes_current) {
-                try selected.append(allocator, .{ .path = entry.path, .bytes = entry.bytes });
-                break;
-            }
-            if (choice == .no_current) break;
-            if (choice == .yes_all) {
-                try selected.append(allocator, .{ .path = entry.path, .bytes = entry.bytes });
-                all_remaining = true;
-                break;
-            }
-            try stdout.print("Invalid input. Use: y, n, or y-all.\n", .{});
-        }
-    }
 
     if (selected.items.len == 0) {
         try stdout.print("No directories selected for deletion.\n", .{});
@@ -134,7 +111,15 @@ fn runScanAndInteractiveDelete(
     }
 
     const selected_total = calcSelectedTotal(selected.items);
-    const report = try rm.remover.applyEntries(stdout, scan_opts.roots, selected.items, selected_total, false);
+    const report = try rm.remover.applyEntries(
+        stdout,
+        scan_opts.roots,
+        selected.items,
+        selected_total,
+        false,
+        scan_opts.delete_workers,
+        scan_opts.progress,
+    );
     try stdout.print(
         "\nInteractive apply: selected {d}, removed {d}, bytes ",
         .{ selected.items.len, report.removed_entries },
@@ -153,6 +138,137 @@ const Choice = enum {
     yes_all,
     invalid,
 };
+
+const DeleteMode = enum {
+    all,
+    none,
+    each,
+    invalid,
+};
+
+fn selectEntriesInteractive(
+    allocator: std.mem.Allocator,
+    stdout: anytype,
+    entries: []const rm.scanner.MatchEntry,
+) !std.ArrayListUnmanaged(rm.snapshot.SnapshotEntry) {
+    const mode = try readDeleteModePrompt(stdout);
+    var selected: std.ArrayListUnmanaged(rm.snapshot.SnapshotEntry) = .empty;
+
+    switch (mode) {
+        .all => {
+            try appendAllSelected(allocator, &selected, entries);
+            return selected;
+        },
+        .none => return selected,
+        .each => {
+            try stdout.print(
+                "Interactive delete: y = delete current, n = skip current, y-all = delete current and all remaining\n",
+                .{},
+            );
+            try stdout.flush();
+            try appendSelectedEach(allocator, stdout, &selected, entries);
+            return selected;
+        },
+        .invalid => unreachable,
+    }
+}
+
+fn appendAllSelected(
+    allocator: std.mem.Allocator,
+    selected: *std.ArrayListUnmanaged(rm.snapshot.SnapshotEntry),
+    entries: []const rm.scanner.MatchEntry,
+) !void {
+    for (entries) |entry| {
+        try selected.append(allocator, .{ .path = entry.path, .bytes = entry.bytes });
+    }
+}
+
+fn appendSelectedEach(
+    allocator: std.mem.Allocator,
+    stdout: anytype,
+    selected: *std.ArrayListUnmanaged(rm.snapshot.SnapshotEntry),
+    entries: []const rm.scanner.MatchEntry,
+) !void {
+    var all_remaining = false;
+    for (entries, 0..) |entry, idx| {
+        if (all_remaining) {
+            try selected.append(allocator, .{ .path = entry.path, .bytes = entry.bytes });
+            continue;
+        }
+
+        while (true) {
+            try stdout.print("[{d}/{d}] {s} -> delete? (y/n/y-all): ", .{ idx + 1, entries.len, entry.path });
+            try stdout.flush();
+
+            const choice = try readChoice();
+            if (choice == .yes_current) {
+                try selected.append(allocator, .{ .path = entry.path, .bytes = entry.bytes });
+                break;
+            }
+            if (choice == .no_current) break;
+            if (choice == .yes_all) {
+                try selected.append(allocator, .{ .path = entry.path, .bytes = entry.bytes });
+                all_remaining = true;
+                break;
+            }
+            try stdout.print("Invalid input. Use: y, n, or y-all.\n", .{});
+        }
+    }
+}
+
+fn selectEntriesByDecisions(
+    allocator: std.mem.Allocator,
+    entries: []const rm.scanner.MatchEntry,
+    decisions: []const Choice,
+) !std.ArrayListUnmanaged(rm.snapshot.SnapshotEntry) {
+    var selected: std.ArrayListUnmanaged(rm.snapshot.SnapshotEntry) = .empty;
+    var all_remaining = false;
+
+    for (entries, 0..) |entry, idx| {
+        if (all_remaining) {
+            try selected.append(allocator, .{ .path = entry.path, .bytes = entry.bytes });
+            continue;
+        }
+        const c = if (idx < decisions.len) decisions[idx] else .no_current;
+        switch (c) {
+            .yes_current => try selected.append(allocator, .{ .path = entry.path, .bytes = entry.bytes }),
+            .no_current, .invalid => {},
+            .yes_all => {
+                try selected.append(allocator, .{ .path = entry.path, .bytes = entry.bytes });
+                all_remaining = true;
+            },
+        }
+    }
+    return selected;
+}
+
+fn readDeleteModePrompt(stdout: anytype) !DeleteMode {
+    while (true) {
+        try stdout.print("Delete mode (all/a, none/n, each/e): ", .{});
+        try stdout.flush();
+        const mode = try readDeleteMode();
+        if (mode != .invalid) return mode;
+        try stdout.print("Invalid input. Use: all/a, none/n, or each/e.\n", .{});
+    }
+}
+
+fn readDeleteMode() !DeleteMode {
+    var stdin_buf: [512]u8 = undefined;
+    var stdin_reader = std.fs.File.stdin().reader(&stdin_buf);
+    const stdin = &stdin_reader.interface;
+
+    const maybe_line = try stdin.takeDelimiter('\n');
+    const line = maybe_line orelse return .none;
+    const trimmed = std.mem.trim(u8, line, " \t\r\n");
+    return parseDeleteMode(trimmed);
+}
+
+fn parseDeleteMode(trimmed: []const u8) DeleteMode {
+    if (std.ascii.eqlIgnoreCase(trimmed, "all") or std.ascii.eqlIgnoreCase(trimmed, "a")) return .all;
+    if (std.ascii.eqlIgnoreCase(trimmed, "none") or std.ascii.eqlIgnoreCase(trimmed, "n")) return .none;
+    if (std.ascii.eqlIgnoreCase(trimmed, "each") or std.ascii.eqlIgnoreCase(trimmed, "e")) return .each;
+    return .invalid;
+}
 
 fn readChoice() !Choice {
     var stdin_buf: [512]u8 = undefined;
@@ -201,4 +317,61 @@ test "usage parsing defaults to interactive command" {
     var cmd = try rm.config.parseArgs(allocator, &args);
     defer cmd.deinit(allocator);
     _ = cmd.interactive;
+}
+
+test "parse delete mode aliases" {
+    try std.testing.expect(parseDeleteMode("all") == .all);
+    try std.testing.expect(parseDeleteMode("a") == .all);
+    try std.testing.expect(parseDeleteMode("none") == .none);
+    try std.testing.expect(parseDeleteMode("n") == .none);
+    try std.testing.expect(parseDeleteMode("each") == .each);
+    try std.testing.expect(parseDeleteMode("e") == .each);
+    try std.testing.expect(parseDeleteMode("x") == .invalid);
+}
+
+test "append all selected selects every entry" {
+    const allocator = std.testing.allocator;
+    const entries = [_]rm.scanner.MatchEntry{
+        .{ .path = "C:\\a\\node_modules", .bytes = 100 },
+        .{ .path = "C:\\b\\target", .bytes = 200 },
+    };
+    var out: std.ArrayListUnmanaged(rm.snapshot.SnapshotEntry) = .empty;
+    defer out.deinit(allocator);
+
+    try appendAllSelected(allocator, &out, &entries);
+    try std.testing.expectEqual(@as(usize, 2), out.items.len);
+    try std.testing.expectEqualStrings(entries[0].path, out.items[0].path);
+    try std.testing.expectEqualStrings(entries[1].path, out.items[1].path);
+}
+
+test "select entries by decisions keeps only selected subset" {
+    const allocator = std.testing.allocator;
+    const entries = [_]rm.scanner.MatchEntry{
+        .{ .path = "C:\\a\\node_modules", .bytes = 10 },
+        .{ .path = "C:\\b\\target", .bytes = 20 },
+        .{ .path = "C:\\c\\dist", .bytes = 30 },
+    };
+    const decisions = [_]Choice{ .yes_current, .no_current, .yes_current };
+    var out = try selectEntriesByDecisions(allocator, &entries, &decisions);
+    defer out.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), out.items.len);
+    try std.testing.expectEqualStrings(entries[0].path, out.items[0].path);
+    try std.testing.expectEqualStrings(entries[2].path, out.items[1].path);
+}
+
+test "select entries by decisions y-all selects current and remaining" {
+    const allocator = std.testing.allocator;
+    const entries = [_]rm.scanner.MatchEntry{
+        .{ .path = "C:\\a\\node_modules", .bytes = 10 },
+        .{ .path = "C:\\b\\target", .bytes = 20 },
+        .{ .path = "C:\\c\\dist", .bytes = 30 },
+    };
+    const decisions = [_]Choice{ .no_current, .yes_all };
+    var out = try selectEntriesByDecisions(allocator, &entries, &decisions);
+    defer out.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), out.items.len);
+    try std.testing.expectEqualStrings(entries[1].path, out.items[0].path);
+    try std.testing.expectEqualStrings(entries[2].path, out.items[1].path);
 }

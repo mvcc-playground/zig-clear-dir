@@ -15,7 +15,7 @@ pub fn applySnapshot(writer: anytype, opts: config.ApplyOptions, data: *const sn
         return error.InvalidConfirmationToken;
     }
 
-    return applyEntries(writer, data.roots, data.entries, data.total_bytes, opts.dry_run);
+    return applyEntries(writer, data.roots, data.entries, data.total_bytes, opts.dry_run, 1, true);
 }
 
 pub fn applyEntries(
@@ -24,6 +24,8 @@ pub fn applyEntries(
     entries: []const snapshot.SnapshotEntry,
     total_bytes: u64,
     dry_run: bool,
+    delete_workers: usize,
+    progress: bool,
 ) !ApplyReport {
     const paths = try std.heap.page_allocator.alloc(snapshot.SnapshotEntry, entries.len);
     defer std.heap.page_allocator.free(paths);
@@ -32,28 +34,134 @@ pub fn applyEntries(
 
     std.sort.heap(snapshot.SnapshotEntry, paths, {}, byPathDesc);
 
-    var removed: usize = 0;
-
     for (paths) |entry| {
         try ensureSafePath(entry.path, roots);
+    }
 
-        if (dry_run) {
+    if (dry_run) {
+        for (paths) |entry| {
             try writer.print("[dry-run] would remove {s} ({d} bytes)\n", .{ entry.path, entry.bytes });
-            removed += 1;
-            continue;
         }
+        return .{
+            .total_entries = entries.len,
+            .removed_entries = entries.len,
+            .total_bytes = total_bytes,
+        };
+    }
 
-        try platform.fs.deleteTree(entry.path);
+    const worker_count = @min(paths.len, @max(@as(usize, 1), delete_workers));
+    if (worker_count <= 1 or paths.len <= 1) {
+        for (paths) |entry| {
+            try platform.fs.deleteTree(entry.path);
+            if (progress) try writer.print("removed {s} ({d} bytes)\n", .{ entry.path, entry.bytes });
+        }
+        return .{
+            .total_entries = entries.len,
+            .removed_entries = entries.len,
+            .total_bytes = total_bytes,
+        };
+    }
 
-        removed += 1;
-        try writer.print("removed {s} ({d} bytes)\n", .{ entry.path, entry.bytes });
+    var pending = try std.heap.page_allocator.alloc(bool, paths.len);
+    defer std.heap.page_allocator.free(pending);
+    @memset(pending, true);
+
+    var done_count: usize = 0;
+    while (done_count < paths.len) {
+        var batch_indices = std.ArrayListUnmanaged(usize).empty;
+        defer batch_indices.deinit(std.heap.page_allocator);
+        try buildBatch(paths, pending, worker_count, &batch_indices);
+        if (batch_indices.items.len == 0) return error.Unexpected;
+
+        var batch_ok = try std.heap.page_allocator.alloc(bool, batch_indices.items.len);
+        defer std.heap.page_allocator.free(batch_ok);
+        @memset(batch_ok, false);
+        var first_error: ?anyerror = null;
+        var lock: std.Thread.Mutex = .{};
+
+        var pool: std.Thread.Pool = undefined;
+        try pool.init(.{ .allocator = std.heap.page_allocator, .n_jobs = batch_indices.items.len });
+        defer pool.deinit();
+        var wg: std.Thread.WaitGroup = .{};
+        for (batch_indices.items, 0..) |path_idx, i| {
+            pool.spawnWg(&wg, struct {
+                fn run(all_paths: []const snapshot.SnapshotEntry, idx: usize, ok_out: *bool, first_err: *?anyerror, mtx: *std.Thread.Mutex) void {
+                    platform.fs.deleteTree(all_paths[idx].path) catch |err| {
+                        mtx.lock();
+                        defer mtx.unlock();
+                        if (first_err.* == null) first_err.* = err;
+                        return;
+                    };
+                    ok_out.* = true;
+                }
+            }.run, .{ paths, path_idx, &batch_ok[i], &first_error, &lock });
+        }
+        wg.wait();
+        if (first_error) |err| return err;
+
+        for (batch_indices.items, 0..) |path_idx, i| {
+            if (!batch_ok[i]) continue;
+            pending[path_idx] = false;
+            done_count += 1;
+        }
+        if (progress) {
+            try writer.print("progress: removed {d}/{d}\n", .{ done_count, paths.len });
+        }
     }
 
     return .{
         .total_entries = entries.len,
-        .removed_entries = removed,
+        .removed_entries = entries.len,
         .total_bytes = total_bytes,
     };
+}
+
+fn buildBatch(
+    paths: []const snapshot.SnapshotEntry,
+    pending: []const bool,
+    max_batch: usize,
+    out: *std.ArrayListUnmanaged(usize),
+) !void {
+    for (paths, 0..) |entry, idx| {
+        if (!pending[idx]) continue;
+
+        var conflict = false;
+        for (out.items) |already_idx| {
+            if (pathsRelated(entry.path, paths[already_idx].path)) {
+                conflict = true;
+                break;
+            }
+        }
+        if (conflict) continue;
+
+        try out.append(std.heap.page_allocator, idx);
+        if (out.items.len >= max_batch) break;
+    }
+
+    if (out.items.len == 0) {
+        for (pending, 0..) |is_pending, idx| {
+            if (is_pending) {
+                try out.append(std.heap.page_allocator, idx);
+                break;
+            }
+        }
+    }
+}
+
+fn pathsRelated(a: []const u8, b: []const u8) bool {
+    return isAncestorPath(a, b) or isAncestorPath(b, a);
+}
+
+fn isAncestorPath(ancestor: []const u8, child: []const u8) bool {
+    if (builtin.os.tag == .windows) {
+        if (!std.ascii.startsWithIgnoreCase(child, ancestor)) return false;
+    } else {
+        if (!std.mem.startsWith(u8, child, ancestor)) return false;
+    }
+
+    if (child.len == ancestor.len) return true;
+    const next = child[ancestor.len];
+    return next == std.fs.path.sep or next == '/' or next == '\\';
 }
 
 fn byPathDesc(_: void, a: snapshot.SnapshotEntry, b: snapshot.SnapshotEntry) bool {
@@ -149,4 +257,48 @@ test "apply removes only snapshot entries" {
 
     const maybe_dir = std.fs.cwd().openDir(entry_path, .{}) catch null;
     try std.testing.expect(maybe_dir == null);
+}
+
+test "apply rejects outside root before deleting anything" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("root/a/node_modules");
+    try tmp.dir.makePath("outside/node_modules");
+    var fa = try tmp.dir.createFile("root/a/node_modules/a.txt", .{});
+    defer fa.close();
+    try fa.writeAll("a");
+    var fb = try tmp.dir.createFile("outside/node_modules/b.txt", .{});
+    defer fb.close();
+    try fb.writeAll("b");
+
+    const allocator = std.testing.allocator;
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base = try tmp.dir.realpath(".", &root_buf);
+    const good = try std.fs.path.join(allocator, &.{ base, "root", "a", "node_modules" });
+    defer allocator.free(good);
+    const bad = try std.fs.path.join(allocator, &.{ base, "outside", "node_modules" });
+    defer allocator.free(bad);
+    const root_only = try std.fs.path.join(allocator, &.{ base, "root" });
+    defer allocator.free(root_only);
+
+    const entries = [_]snapshot.SnapshotEntry{
+        .{ .path = good, .bytes = 1 },
+        .{ .path = bad, .bytes = 1 },
+    };
+    const roots = [_][]const u8{root_only};
+
+    const Sink = struct {
+        fn print(_: *@This(), comptime _: []const u8, _: anytype) !void {}
+    };
+    var sink: Sink = .{};
+
+    try std.testing.expectError(
+        error.PathOutsideRoots,
+        applyEntries(&sink, &roots, &entries, 2, false, 2, false),
+    );
+
+    const still_good = std.fs.cwd().openDir(good, .{}) catch null;
+    try std.testing.expect(still_good != null);
+    if (still_good) |d| d.close();
 }
