@@ -86,8 +86,8 @@ fn runScanAndInteractiveDelete(
         scan_opts.progress,
     );
     try stdout.print(
-        "\nInteractive apply: selected {d}, removed {d}, bytes ",
-        .{ selected.items.len, report.removed_entries },
+        "\nInteractive apply: selected {d}, removed {d}, failed {d}, bytes ",
+        .{ selected.items.len, report.removed_entries, report.failed_entries },
     );
     try printHumanBytes(stdout, report.total_bytes);
     try stdout.print(" ({d} bytes)\n", .{report.total_bytes});
