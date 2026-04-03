@@ -1,0 +1,4 @@
+interface:
+  display_name: "Zig Windows Performance"
+  short_description: "Maximize Zig performance on Windows"
+  default_prompt: "Use $zig-windows-performance to optimize this Zig code for Windows performance and safety."
