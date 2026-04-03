@@ -1,6 +1,8 @@
 const std = @import("std");
 
-pub fn dirSizeExact(path: []const u8) !u64 {
+const heartbeat_ms: i64 = 2000;
+
+pub fn dirSizeExact(path: []const u8, progress: bool) !u64 {
     var stack: std.ArrayListUnmanaged(std.fs.Dir) = .empty;
     defer {
         for (stack.items) |*open_dir| open_dir.close();
@@ -15,9 +17,14 @@ pub fn dirSizeExact(path: []const u8) !u64 {
     try stack.append(std.heap.page_allocator, root_dir);
 
     var total: u64 = 0;
+    var visited_dirs: usize = 0;
+    var visited_files: usize = 0;
+    const started_ms = std.time.milliTimestamp();
+    var next_heartbeat = started_ms + heartbeat_ms;
     while (stack.pop()) |item| {
         var dir = item;
         defer dir.close();
+        visited_dirs += 1;
 
         var it = dir.iterate();
         while (true) {
@@ -50,6 +57,17 @@ pub fn dirSizeExact(path: []const u8) !u64 {
                         else => continue,
                     };
                     total +|= stat.size;
+                    visited_files += 1;
+                    if (progress) {
+                        const now = std.time.milliTimestamp();
+                        if (now >= next_heartbeat) {
+                            std.debug.print(
+                                "progress: sizing working {s} (dirs {d}, files {d}, elapsed {d} ms)\n",
+                                .{ path, visited_dirs, visited_files, now - started_ms },
+                            );
+                            next_heartbeat = now + heartbeat_ms;
+                        }
+                    }
                 },
                 else => {},
             }

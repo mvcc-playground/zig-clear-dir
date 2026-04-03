@@ -1,13 +1,12 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Rules = @import("rules.zig").Rules;
-const SizeMode = @import("config.zig").SizeMode;
 const platform = @import("../platform/mod.zig");
 const windows = std.os.windows;
 const discovery_report_interval: usize = 200;
 const sizing_report_interval: usize = 10;
-const MeasureMode = enum { approx, exact };
 const windows_discovery_worker_cap: usize = 4;
+const windows_sizing_worker_cap: usize = 4;
 const FindExInfoBasic: u32 = 1;
 const FindExSearchNameMatch: u32 = 0;
 const FIND_FIRST_EX_LARGE_FETCH: windows.DWORD = 0x2;
@@ -35,7 +34,6 @@ pub const MatchEntry = struct {
 pub const ScanResult = struct {
     entries: []MatchEntry,
     total_bytes: u64,
-    size_is_estimated: bool,
 
     pub fn deinit(self: *ScanResult, allocator: std.mem.Allocator) void {
         for (self.entries) |entry| allocator.free(entry.path);
@@ -50,8 +48,6 @@ pub fn scan(
     rules: Rules,
     workers: usize,
     progress: bool,
-    with_size: bool,
-    size_mode: SizeMode,
 ) !ScanResult {
     const candidates = try collectCandidates(allocator, roots, rules, workers, progress);
     errdefer {
@@ -66,41 +62,16 @@ pub fn scan(
         for (candidates) |path| {
             std.debug.print("  - {s}\n", .{path});
         }
-        if (with_size and candidates.len > 0) {
-            std.debug.print("progress: calculating sizes ({s})...\n", .{@tagName(size_mode)});
+        if (candidates.len > 0) {
+            std.debug.print("progress: calculating sizes (exact)...\n", .{});
         }
-    }
-    if (!with_size) {
-        const entries = try allocator.alloc(MatchEntry, candidates.len);
-        for (candidates, 0..) |path, idx| {
-            entries[idx] = .{ .path = path, .bytes = 0 };
-        }
-        allocator.free(candidates);
-        return .{ .entries = entries, .total_bytes = 0, .size_is_estimated = false };
     }
 
     const sizes = try allocator.alloc(u64, candidates.len);
     defer allocator.free(sizes);
     @memset(sizes, 0);
-    var is_estimated = false;
     if (candidates.len > 0) {
-        switch (size_mode) {
-            .approx => {
-                is_estimated = platform.size.approx_is_estimated;
-                try measureSizes(allocator, candidates, sizes, workers, progress, .approx);
-            },
-            .exact => {
-                is_estimated = false;
-                try measureSizes(allocator, candidates, sizes, workers, progress, .exact);
-            },
-            .hybrid => {
-                if (progress) std.debug.print("progress: sizing phase 1/2 (estimated)\n", .{});
-                try measureSizes(allocator, candidates, sizes, workers, progress, .approx);
-                if (progress) std.debug.print("progress: sizing phase 2/2 (exact refine)\n", .{});
-                try measureSizes(allocator, candidates, sizes, workers, progress, .exact);
-                is_estimated = false;
-            },
-        }
+        try measureSizes(allocator, candidates, sizes, workers, progress);
     }
 
     const entries = try allocator.alloc(MatchEntry, candidates.len);
@@ -111,7 +82,7 @@ pub fn scan(
     }
     allocator.free(candidates);
 
-    return .{ .entries = entries, .total_bytes = total, .size_is_estimated = is_estimated };
+    return .{ .entries = entries, .total_bytes = total };
 }
 
 fn lessThanPath(_: void, a: []const u8, b: []const u8) bool {
@@ -517,12 +488,16 @@ fn shouldSkipWindowsHiddenOrSystem(path: []const u8) bool {
 const MeasureContext = struct {
     paths: []const []const u8,
     sizes: []u64,
-    next_index: usize = 0,
+    light_indices: []usize,
+    heavy_indices: []usize,
+    next_light: usize = 0,
+    next_heavy: usize = 0,
+    active_heavy: usize = 0,
     first_error: ?anyerror = null,
     completed: usize = 0,
     progress: bool = false,
-    mode: MeasureMode = .exact,
     lock: std.Thread.Mutex = .{},
+    cond: std.Thread.Condition = .{},
 };
 
 fn measureSizes(
@@ -531,17 +506,35 @@ fn measureSizes(
     sizes: []u64,
     workers: usize,
     progress: bool,
-    mode: MeasureMode,
 ) !void {
     if (paths.len == 0) return;
 
-    const effective_workers = effectiveSizingWorkers(workers, paths.len, mode);
+    var light = std.ArrayListUnmanaged(usize).empty;
+    defer light.deinit(allocator);
+    var heavy = std.ArrayListUnmanaged(usize).empty;
+    defer heavy.deinit(allocator);
+
+    for (paths, 0..) |path, idx| {
+        if (isHeavySizingCandidate(path)) {
+            try heavy.append(allocator, idx);
+        } else {
+            try light.append(allocator, idx);
+        }
+    }
+
+    const effective_workers = effectiveSizingWorkers(workers, paths.len);
     var pool: std.Thread.Pool = undefined;
     try pool.init(.{ .allocator = allocator, .n_jobs = effective_workers });
     defer pool.deinit();
 
     var wg: std.Thread.WaitGroup = .{};
-    var context = MeasureContext{ .paths = paths, .sizes = sizes, .progress = progress, .mode = mode };
+    var context = MeasureContext{
+        .paths = paths,
+        .sizes = sizes,
+        .light_indices = light.items,
+        .heavy_indices = heavy.items,
+        .progress = progress,
+    };
 
     const worker_count = @min(effective_workers, paths.len);
     var i: usize = 0;
@@ -557,39 +550,36 @@ fn measureSizes(
     }
 }
 
-fn effectiveSizingWorkers(workers: usize, total_paths: usize, mode: MeasureMode) usize {
+fn effectiveSizingWorkers(workers: usize, total_paths: usize) usize {
     const w = @max(@as(usize, 1), workers);
-    const platform_limit = if (builtin.os.tag == .windows)
-        switch (mode) {
-            .approx => @as(usize, 8),
-            .exact => @as(usize, 4),
-        }
-    else
-        @as(usize, 16);
+    const platform_limit = if (builtin.os.tag == .windows) windows_sizing_worker_cap else @as(usize, 16);
     return @min(total_paths, @min(w, platform_limit));
 }
 
 fn measureWorker(context: *MeasureContext) void {
     while (true) {
-        const idx_opt = getNextIndex(context);
-        if (idx_opt == null) return;
+        const work = getNextIndex(context) orelse return;
 
-        const idx = idx_opt.?;
-        const size = switch (context.mode) {
-            .approx => platform.size.dirSizeApprox(context.paths[idx]),
-            .exact => platform.size.dirSizeExact(context.paths[idx]),
-        } catch |err| {
+        const size = platform.size.dirSizeExact(context.paths[work.idx], context.progress) catch |err| {
             context.lock.lock();
             defer context.lock.unlock();
             if (context.first_error == null) context.first_error = err;
+            if (work.is_heavy and context.active_heavy > 0) {
+                context.active_heavy -= 1;
+            }
+            context.cond.broadcast();
             return;
         };
         context.lock.lock();
-        context.sizes[idx] = size;
+        context.sizes[work.idx] = size;
+        if (work.is_heavy and context.active_heavy > 0) {
+            context.active_heavy -= 1;
+        }
         context.completed += 1;
         const completed = context.completed;
         const total = context.paths.len;
         const should_report = context.progress and (completed % sizing_report_interval == 0 or completed == total);
+        context.cond.broadcast();
         context.lock.unlock();
 
         if (should_report) {
@@ -598,16 +588,50 @@ fn measureWorker(context: *MeasureContext) void {
     }
 }
 
-fn getNextIndex(context: *MeasureContext) ?usize {
+const MeasureWork = struct {
+    idx: usize,
+    is_heavy: bool,
+};
+
+fn getNextIndex(context: *MeasureContext) ?MeasureWork {
     context.lock.lock();
     defer context.lock.unlock();
 
-    if (context.first_error != null) return null;
-    if (context.next_index >= context.paths.len) return null;
+    while (true) {
+        if (context.first_error != null) return null;
 
-    const idx = context.next_index;
-    context.next_index += 1;
-    return idx;
+        if (context.next_light < context.light_indices.len) {
+            const idx = context.light_indices[context.next_light];
+            context.next_light += 1;
+            return .{ .idx = idx, .is_heavy = false };
+        }
+
+        if (context.next_heavy < context.heavy_indices.len and context.active_heavy < heavySizingLimit(context.paths.len)) {
+            const idx = context.heavy_indices[context.next_heavy];
+            context.next_heavy += 1;
+            context.active_heavy += 1;
+            return .{ .idx = idx, .is_heavy = true };
+        }
+
+        if (context.next_light >= context.light_indices.len and context.next_heavy >= context.heavy_indices.len and context.active_heavy == 0) {
+            return null;
+        }
+
+        context.cond.wait(&context.lock);
+    }
+}
+
+fn heavySizingLimit(total_paths: usize) usize {
+    if (builtin.os.tag != .windows) return @max(@as(usize, 1), @min(total_paths, @as(usize, 4)));
+    if (total_paths <= 2) return 1;
+    return 2;
+}
+
+fn isHeavySizingCandidate(path: []const u8) bool {
+    const base = std.fs.path.basename(path);
+    return std.ascii.eqlIgnoreCase(base, "node_modules") or
+        std.ascii.eqlIgnoreCase(base, "target") or
+        std.ascii.eqlIgnoreCase(base, "vendor");
 }
 
 test "scan prunes matched dir" {
@@ -627,7 +651,7 @@ test "scan prunes matched dir" {
     var rules = try Rules.init(allocator, &.{"node_modules"}, &.{}, &.{}, true);
     defer rules.deinit();
 
-    var result = try scan(allocator, &.{root_path}, rules, 2, false, false, .approx);
+    var result = try scan(allocator, &.{root_path}, rules, 2, false);
     defer result.deinit(allocator);
 
     try std.testing.expect(result.entries.len == 1);
@@ -651,13 +675,13 @@ test "scan handles multiple roots consistently" {
     var rules = try Rules.init(allocator, &.{ "node_modules", "target" }, &.{}, &.{}, true);
     defer rules.deinit();
 
-    var result = try scan(allocator, &.{ root_one, root_two }, rules, 4, false, false, .approx);
+    var result = try scan(allocator, &.{ root_one, root_two }, rules, 4, false);
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(@as(usize, 2), result.entries.len);
 }
 
-test "scan with-size mode reports precision flag" {
+test "scan always reports exact bytes" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -673,15 +697,9 @@ test "scan with-size mode reports precision flag" {
     var rules = try Rules.init(allocator, &.{"target"}, &.{}, &.{}, true);
     defer rules.deinit();
 
-    var approx_result = try scan(allocator, &.{root_path}, rules, 4, false, true, .approx);
-    defer approx_result.deinit(allocator);
-    try std.testing.expectEqual(@as(usize, 1), approx_result.entries.len);
-    try std.testing.expect(approx_result.entries[0].bytes > 0);
-    try std.testing.expectEqual(platform.size.approx_is_estimated, approx_result.size_is_estimated);
-
-    var exact_result = try scan(allocator, &.{root_path}, rules, 4, false, true, .exact);
-    defer exact_result.deinit(allocator);
-    try std.testing.expectEqual(@as(usize, 1), exact_result.entries.len);
-    try std.testing.expect(exact_result.entries[0].bytes > 0);
-    try std.testing.expect(!exact_result.size_is_estimated);
+    var result = try scan(allocator, &.{root_path}, rules, 4, false);
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), result.entries.len);
+    try std.testing.expect(result.entries[0].bytes > 0);
+    try std.testing.expect(result.total_bytes > 0);
 }

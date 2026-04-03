@@ -45,21 +45,15 @@ Fluxo do prompt de remocao:
 - `n` => pula item atual
 - `y-all` => apaga item atual e todos os restantes
 
-### Incluir calculo de tamanho
+### Calculo de tamanho exato
 
 ```powershell
-zig build run -- --dir C:\Users\mathe\projetos --with-size
+zig build run -- --dir C:\Users\mathe\projetos
 ```
 
-A saida mostra tamanhos em formato humano e em bytes:
+A saida sempre mostra tamanhos exatos em formato humano e em bytes:
 
 - `13.20 GB (14171541246 bytes)`
-
-Modo de calculo (`--size-mode`):
-
-- `approx` (padrao): mais rapido no Windows, resultado marcado como `estimated`.
-- `exact`: calculo completo, resultado marcado como `exact`.
-- `hybrid`: faz estimativa e depois refinamento exato.
 
 ## Opcoes Principais
 
@@ -71,15 +65,13 @@ Modo de calculo (`--size-mode`):
 - `--no-skip-dot-dirs`: permite entrar em pastas que comecam com ponto.
 - `--workers auto|N`
 - `--delete-workers auto|N`
-- `--with-size`
-- `--size-mode <approx|exact|hybrid>`
 - `--no-progress`
 - `--delete-workers auto|N`
 
 Voce pode repetir `--match-dir` e `--skip-dir`, ou passar lista por virgula:
 
 ```powershell
-zig build run -- --dir C:\Users\mathe\projetos --match-dir node_modules,target,dist --skip-dir AppData,.git --skip-path-regex ".*/\\..*" --with-size --size-mode approx
+zig build run -- --dir C:\Users\mathe\projetos --match-dir node_modules,target,dist --skip-dir AppData,.git --skip-path-regex ".*/\\..*"
 ```
 
 Exemplo sem defaults embutidos:
@@ -91,7 +83,7 @@ zig build run -- --dir C:\Users\mathe\projetos --no-default-rules --match-dir ta
 ## Performance
 
 - Discovery rapido por padrao.
-- Calculo de tamanho e opcional (`--with-size`).
+- Calculo de tamanho exato sempre ativo.
 - Adaptador de tamanho por SO (`platform.size`) para otimizar por plataforma.
 - Logs de progresso durante discovery e sizing.
 
@@ -126,5 +118,5 @@ Se `zig build run` falhar por problema intermitente de processo/pipe no ambiente
 
 ```powershell
 zig build -Doptimize=ReleaseFast
-.\zig-out\bin\rm-folders.exe --dir C:\Users\mathe\projetos --with-size
+.\zig-out\bin\rm-folders.exe --dir C:\Users\mathe\projetos
 ```

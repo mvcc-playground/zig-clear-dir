@@ -42,33 +42,22 @@ fn runScanAndInteractiveDelete(
     defer rules.deinit();
 
     const started = std.time.microTimestamp();
-    var result = try rm.scanner.scan(allocator, scan_opts.roots, rules, scan_opts.workers, scan_opts.progress, scan_opts.with_size, scan_opts.size_mode);
+    var result = try rm.scanner.scan(allocator, scan_opts.roots, rules, scan_opts.workers, scan_opts.progress);
     defer result.deinit(allocator);
 
     for (result.entries) |entry| {
-        if (scan_opts.with_size) {
-            try stdout.print("{s}\t", .{entry.path});
-            try printHumanBytes(stdout, entry.bytes);
-            try stdout.print(" ({d} bytes)\n", .{entry.bytes});
-        } else {
-            try stdout.print("{s}\n", .{entry.path});
-        }
+        try stdout.print("{s}\t", .{entry.path});
+        try printHumanBytes(stdout, entry.bytes);
+        try stdout.print(" ({d} bytes)\n", .{entry.bytes});
     }
 
     const elapsed_us = std.time.microTimestamp() - started;
-    if (scan_opts.with_size) {
-        try stdout.print(
-            "\nFound {d} directories, total reclaimable ({s}): ",
-            .{ result.entries.len, if (result.size_is_estimated) "estimated" else "exact" },
-        );
-        try printHumanBytes(stdout, result.total_bytes);
-        try stdout.print(" ({d} bytes)\nElapsed: {d} ms\n", .{ result.total_bytes, @divFloor(elapsed_us, 1000) });
-    } else {
-        try stdout.print(
-            "\nFound {d} directories (size not calculated)\nElapsed: {d} ms\nUse --with-size to calculate bytes.\n",
-            .{ result.entries.len, @divFloor(elapsed_us, 1000) },
-        );
-    }
+    try stdout.print(
+        "\nFound {d} directories, total reclaimable (exact): ",
+        .{result.entries.len},
+    );
+    try printHumanBytes(stdout, result.total_bytes);
+    try stdout.print(" ({d} bytes)\nElapsed: {d} ms\n", .{ result.total_bytes, @divFloor(elapsed_us, 1000) });
 
     if (!interactive or result.entries.len == 0) return;
 
