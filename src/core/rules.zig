@@ -8,6 +8,13 @@ pub const Rules = struct {
     skip_dirs: [][]const u8,
     skip_path_regexes: [][]const u8,
     skip_dot_dirs: bool,
+    match_keys: []const NameKey,
+    skip_keys: []const NameKey,
+
+    const NameKey = struct {
+        len: usize,
+        hash: u64,
+    };
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -16,21 +23,44 @@ pub const Rules = struct {
         skip_path_regexes: []const []const u8,
         skip_dot_dirs: bool,
     ) !Rules {
+        const normalized_match_dirs = try normalizeList(allocator, match_dirs);
+        errdefer {
+            for (normalized_match_dirs) |item| allocator.free(item);
+            allocator.free(normalized_match_dirs);
+        }
+        const normalized_skip_dirs = try normalizeList(allocator, skip_dirs);
+        errdefer {
+            for (normalized_skip_dirs) |item| allocator.free(item);
+            allocator.free(normalized_skip_dirs);
+        }
+        const skip_patterns = try cloneList(allocator, skip_path_regexes);
+        errdefer {
+            for (skip_patterns) |item| allocator.free(item);
+            allocator.free(skip_patterns);
+        }
+        const match_keys = try buildKeys(allocator, normalized_match_dirs);
+        errdefer allocator.free(match_keys);
+        const skip_keys = try buildKeys(allocator, normalized_skip_dirs);
+        errdefer allocator.free(skip_keys);
         return .{
             .allocator = allocator,
-            .match_dirs = try normalizeList(allocator, match_dirs),
-            .skip_dirs = try normalizeList(allocator, skip_dirs),
-            .skip_path_regexes = try cloneList(allocator, skip_path_regexes),
+            .match_dirs = normalized_match_dirs,
+            .skip_dirs = normalized_skip_dirs,
+            .skip_path_regexes = skip_patterns,
             .skip_dot_dirs = skip_dot_dirs,
+            .match_keys = match_keys,
+            .skip_keys = skip_keys,
         };
     }
 
     pub fn deinit(self: *Rules) void {
         for (self.match_dirs) |item| self.allocator.free(item);
         self.allocator.free(self.match_dirs);
+        self.allocator.free(self.match_keys);
 
         for (self.skip_dirs) |item| self.allocator.free(item);
         self.allocator.free(self.skip_dirs);
+        self.allocator.free(self.skip_keys);
         for (self.skip_path_regexes) |item| self.allocator.free(item);
         self.allocator.free(self.skip_path_regexes);
 
@@ -38,11 +68,11 @@ pub const Rules = struct {
     }
 
     pub fn shouldMatchDir(self: Rules, name: []const u8) bool {
-        return containsNormalized(self.match_dirs, name);
+        return containsNormalizedWithKeys(self.match_dirs, self.match_keys, name);
     }
 
     pub fn shouldSkipDir(self: Rules, name: []const u8) bool {
-        return containsNormalized(self.skip_dirs, name);
+        return containsNormalizedWithKeys(self.skip_dirs, self.skip_keys, name);
     }
 
     pub fn shouldSkipPath(self: Rules, full_path: []const u8, dir_name: []const u8) bool {
@@ -53,8 +83,13 @@ pub const Rules = struct {
         return false;
     }
 
-    fn containsNormalized(values: []const []const u8, name: []const u8) bool {
-        for (values) |v| {
+    fn containsNormalizedWithKeys(values: []const []const u8, keys: []const NameKey, name: []const u8) bool {
+        const needle = NameKey{
+            .len = name.len,
+            .hash = hashName(name),
+        };
+        for (values, keys) |v, key| {
+            if (key.len != needle.len or key.hash != needle.hash) continue;
             if (equalName(v, name)) return true;
         }
         return false;
@@ -99,6 +134,30 @@ pub const Rules = struct {
             return std.ascii.eqlIgnoreCase(normalized, raw);
         }
         return std.mem.eql(u8, normalized, raw);
+    }
+
+    fn buildKeys(allocator: std.mem.Allocator, values: []const []const u8) ![]NameKey {
+        const keys = try allocator.alloc(NameKey, values.len);
+        for (values, 0..) |value, idx| {
+            keys[idx] = .{
+                .len = value.len,
+                .hash = hashName(value),
+            };
+        }
+        return keys;
+    }
+
+    fn hashName(name: []const u8) u64 {
+        var hasher = std.hash.Wyhash.init(0);
+        if (builtin.os.tag == .windows) {
+            for (name) |ch| {
+                const lower = std.ascii.toLower(ch);
+                hasher.update(&[1]u8{lower});
+            }
+        } else {
+            hasher.update(name);
+        }
+        return hasher.final();
     }
 };
 
