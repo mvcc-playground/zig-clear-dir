@@ -8,6 +8,8 @@ pub const ScanOptions = struct {
     match_dirs: [][]const u8,
     skip_dirs: [][]const u8,
     snapshot_path: []const u8,
+    snapshot_explicit: bool,
+    no_snapshot: bool,
     workers: usize,
     progress: bool,
     with_size: bool,
@@ -73,7 +75,7 @@ pub fn printUsage(writer: anytype) !void {
         \\
         \\  rm-folders scan --root <path> [--root <path> ...]
         \\      [--match-dir <name> ...] [--skip-dir <name> ...]
-        \\      [--workers auto|N] [--snapshot <path>] [--no-progress] [--with-size]
+        \\      [--workers auto|N] [--snapshot <path>] [--no-snapshot] [--no-progress] [--with-size]
         \\
         \\  rm-folders apply --snapshot <path> --confirm REMOVE [--dry-run]
         \\
@@ -113,6 +115,8 @@ fn parseScan(allocator: std.mem.Allocator, raw: []const []const u8) !ScanOptions
     var workers: usize = defaultWorkers();
     var progress = true;
     var with_size = false;
+    var snapshot_explicit = false;
+    var no_snapshot = false;
 
     var i: usize = 0;
     while (i < raw.len) : (i += 1) {
@@ -152,6 +156,11 @@ fn parseScan(allocator: std.mem.Allocator, raw: []const []const u8) !ScanOptions
             if (i >= raw.len) return error.MissingValue;
             if (snapshot_path) |old| allocator.free(old);
             snapshot_path = try absolutePath(allocator, raw[i]);
+            snapshot_explicit = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--no-snapshot")) {
+            no_snapshot = true;
             continue;
         }
         if (std.mem.eql(u8, arg, "--no-progress")) {
@@ -168,10 +177,7 @@ fn parseScan(allocator: std.mem.Allocator, raw: []const []const u8) !ScanOptions
     if (roots_list.items.len == 0) return error.InvalidArgs;
 
     if (snapshot_path == null) {
-        const now = std.time.timestamp();
-        const generated = try std.fmt.allocPrint(allocator, ".rm-folders/snapshots/{d}.json", .{now});
-        defer allocator.free(generated);
-        snapshot_path = try absolutePath(allocator, generated);
+        snapshot_path = try defaultSnapshotPath(allocator);
     }
 
     return .{
@@ -179,6 +185,8 @@ fn parseScan(allocator: std.mem.Allocator, raw: []const []const u8) !ScanOptions
         .match_dirs = try match_list.toOwnedSlice(allocator),
         .skip_dirs = try skip_list.toOwnedSlice(allocator),
         .snapshot_path = snapshot_path.?,
+        .snapshot_explicit = snapshot_explicit,
+        .no_snapshot = no_snapshot,
         .workers = workers,
         .progress = progress,
         .with_size = with_size,
@@ -217,6 +225,11 @@ fn parseInteractive(allocator: std.mem.Allocator, raw: []const []const u8) !Scan
             if (i >= raw.len) return error.MissingValue;
             allocator.free(opts.snapshot_path);
             opts.snapshot_path = try absolutePath(allocator, raw[i]);
+            opts.snapshot_explicit = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--no-snapshot")) {
+            opts.no_snapshot = true;
             continue;
         }
         if (std.mem.eql(u8, arg, "--workers")) {
@@ -343,6 +356,33 @@ fn absolutePath(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
     return try std.fs.path.join(allocator, &.{ cwd, input });
 }
 
+fn defaultSnapshotPath(allocator: std.mem.Allocator) ![]const u8 {
+    const home = try resolveHomeDir(allocator);
+    defer allocator.free(home);
+    const now = std.time.timestamp();
+    const filename = try std.fmt.allocPrint(allocator, "{d}.json", .{now});
+    defer allocator.free(filename);
+    return try std.fs.path.join(allocator, &.{ home, ".rm-folders", "snapshots", filename });
+}
+
+fn resolveHomeDir(allocator: std.mem.Allocator) ![]const u8 {
+    return std.process.getEnvVarOwned(allocator, "HOME") catch |home_err| switch (home_err) {
+        error.EnvironmentVariableNotFound => {
+            return std.process.getEnvVarOwned(allocator, "USERPROFILE") catch |up_err| switch (up_err) {
+                error.EnvironmentVariableNotFound => blk: {
+                    const drive = try std.process.getEnvVarOwned(allocator, "HOMEDRIVE");
+                    defer allocator.free(drive);
+                    const path = try std.process.getEnvVarOwned(allocator, "HOMEPATH");
+                    defer allocator.free(path);
+                    break :blk try std.fs.path.join(allocator, &.{ drive, path });
+                },
+                else => |e| return e,
+            };
+        },
+        else => |e| return e,
+    };
+}
+
 test "parse scan with defaults" {
     const allocator = std.testing.allocator;
     const args = [_][]const u8{ "rm-folders", "scan", "--root", "." };
@@ -357,6 +397,8 @@ test "parse scan with defaults" {
             try std.testing.expect(scan.workers >= 1);
             try std.testing.expect(scan.progress);
             try std.testing.expect(!scan.with_size);
+            try std.testing.expect(!scan.snapshot_explicit);
+            try std.testing.expect(!scan.no_snapshot);
         },
         else => return error.TestUnexpectedResult,
     }

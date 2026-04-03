@@ -23,13 +23,15 @@ pub fn main() !void {
         return error.InvalidArgs;
     };
     defer command.deinit(allocator);
+    const argv0 = if (argv.len > 0) argv[0] else "";
 
     switch (command) {
         .interactive => |scan_opts| {
-            try runScanAndInteractiveDelete(allocator, stdout, scan_opts, true);
+            const save_snapshot = !scan_opts.no_snapshot and (scan_opts.snapshot_explicit or !isLikelyZigBuildRun(argv0));
+            try runScanAndInteractiveDelete(allocator, stdout, scan_opts, true, save_snapshot);
         },
         .scan => |scan_opts| {
-            try runScanAndInteractiveDelete(allocator, stdout, scan_opts, false);
+            try runScanAndInteractiveDelete(allocator, stdout, scan_opts, false, !scan_opts.no_snapshot);
         },
         .apply => |apply_opts| {
             var loaded = try rm.snapshot.loadAndValidate(allocator, apply_opts.snapshot_path);
@@ -51,6 +53,7 @@ fn runScanAndInteractiveDelete(
     stdout: anytype,
     scan_opts: rm.config.ScanOptions,
     interactive: bool,
+    save_snapshot: bool,
 ) !void {
     var rules = try rm.rules.Rules.init(allocator, scan_opts.match_dirs, scan_opts.skip_dirs);
     defer rules.deinit();
@@ -59,7 +62,9 @@ fn runScanAndInteractiveDelete(
     var result = try rm.scanner.scan(allocator, scan_opts.roots, rules, scan_opts.workers, scan_opts.progress, scan_opts.with_size);
     defer result.deinit(allocator);
 
-    try rm.snapshot.save(allocator, scan_opts, result);
+    if (save_snapshot) {
+        try rm.snapshot.save(allocator, scan_opts, result);
+    }
 
     for (result.entries) |entry| {
         try stdout.print("{s}\t{d}\n", .{ entry.path, entry.bytes });
@@ -67,15 +72,29 @@ fn runScanAndInteractiveDelete(
 
     const elapsed_us = std.time.microTimestamp() - started;
     if (scan_opts.with_size) {
-        try stdout.print(
-            "\nFound {d} directories, total reclaimable: {d} bytes\nSnapshot: {s}\nElapsed: {d} ms\n",
-            .{ result.entries.len, result.total_bytes, scan_opts.snapshot_path, @divFloor(elapsed_us, 1000) },
-        );
+        if (save_snapshot) {
+            try stdout.print(
+                "\nFound {d} directories, total reclaimable: {d} bytes\nSnapshot: {s}\nElapsed: {d} ms\n",
+                .{ result.entries.len, result.total_bytes, scan_opts.snapshot_path, @divFloor(elapsed_us, 1000) },
+            );
+        } else {
+            try stdout.print(
+                "\nFound {d} directories, total reclaimable: {d} bytes\nSnapshot: (not saved)\nElapsed: {d} ms\n",
+                .{ result.entries.len, result.total_bytes, @divFloor(elapsed_us, 1000) },
+            );
+        }
     } else {
-        try stdout.print(
-            "\nFound {d} directories (size not calculated)\nSnapshot: {s}\nElapsed: {d} ms\nUse --with-size to calculate bytes.\n",
-            .{ result.entries.len, scan_opts.snapshot_path, @divFloor(elapsed_us, 1000) },
-        );
+        if (save_snapshot) {
+            try stdout.print(
+                "\nFound {d} directories (size not calculated)\nSnapshot: {s}\nElapsed: {d} ms\nUse --with-size to calculate bytes.\n",
+                .{ result.entries.len, scan_opts.snapshot_path, @divFloor(elapsed_us, 1000) },
+            );
+        } else {
+            try stdout.print(
+                "\nFound {d} directories (size not calculated)\nSnapshot: (not saved)\nElapsed: {d} ms\nUse --with-size to calculate bytes.\n",
+                .{ result.entries.len, @divFloor(elapsed_us, 1000) },
+            );
+        }
     }
 
     if (!interactive or result.entries.len == 0) return;
@@ -123,6 +142,10 @@ fn runScanAndInteractiveDelete(
         "\nInteractive apply: selected {d}, removed {d}, bytes {d}\n",
         .{ selected.items.len, report.removed_entries, report.total_bytes },
     );
+}
+
+fn isLikelyZigBuildRun(argv0: []const u8) bool {
+    return std.mem.indexOf(u8, argv0, ".zig-cache") != null;
 }
 
 const Choice = enum {
