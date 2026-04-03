@@ -1,5 +1,11 @@
 const common = @import("size_common.zig");
 
-pub fn dirSize(path: []const u8, progress: bool, sub_workers: usize) !u64 {
-    return common.dirSize(path, progress, sub_workers);
+pub const approx_is_estimated: bool = false;
+
+pub fn dirSizeApprox(path: []const u8) !u64 {
+    return common.dirSizeExact(path);
+}
+
+pub fn dirSizeExact(path: []const u8) !u64 {
+    return common.dirSizeExact(path);
 }

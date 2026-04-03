@@ -5,6 +5,12 @@ const lists = @import("string_lists.zig");
 
 pub const ConfirmToken = "REMOVE";
 
+pub const SizeMode = enum {
+    approx,
+    exact,
+    hybrid,
+};
+
 pub const ScanOptions = struct {
     roots: [][]const u8,
     match_dirs: [][]const u8,
@@ -17,6 +23,7 @@ pub const ScanOptions = struct {
     workers: usize,
     progress: bool,
     with_size: bool,
+    size_mode: SizeMode,
 
     pub fn deinit(self: *ScanOptions, allocator: std.mem.Allocator) void {
         lists.freeStringSlice(allocator, self.roots);
@@ -67,6 +74,7 @@ pub fn printUsage(writer: anytype) !void {
         \\      (default: scan + interactive delete prompt)
         \\      [--no-default-rules]
         \\      [--skip-path-regex <pattern>] [--no-skip-dot-dirs]
+        \\      [--with-size] [--size-mode approx|exact|hybrid]
         \\
     , .{});
 }
@@ -103,6 +111,7 @@ fn parseScan(allocator: std.mem.Allocator, raw: []const []const u8) !ScanOptions
     var workers: usize = defaultWorkers();
     var progress = true;
     var with_size = false;
+    var size_mode: SizeMode = .approx;
     var snapshot_explicit = false;
     var no_snapshot = false;
 
@@ -172,6 +181,12 @@ fn parseScan(allocator: std.mem.Allocator, raw: []const []const u8) !ScanOptions
             with_size = true;
             continue;
         }
+        if (std.mem.eql(u8, arg, "--size-mode")) {
+            i += 1;
+            if (i >= raw.len) return error.MissingValue;
+            size_mode = parseSizeMode(raw[i]) orelse return error.InvalidArgs;
+            continue;
+        }
         return error.InvalidArgs;
     }
 
@@ -193,6 +208,7 @@ fn parseScan(allocator: std.mem.Allocator, raw: []const []const u8) !ScanOptions
         .workers = workers,
         .progress = progress,
         .with_size = with_size,
+        .size_mode = size_mode,
     };
 }
 
@@ -281,6 +297,12 @@ fn parseInteractive(allocator: std.mem.Allocator, raw: []const []const u8) !Scan
             opts.with_size = true;
             continue;
         }
+        if (std.mem.eql(u8, arg, "--size-mode")) {
+            i += 1;
+            if (i >= raw.len) return error.MissingValue;
+            opts.size_mode = parseSizeMode(raw[i]) orelse return error.InvalidArgs;
+            continue;
+        }
         if (std.mem.eql(u8, arg, "--no-progress")) {
             opts.progress = false;
             continue;
@@ -294,6 +316,13 @@ fn parseInteractive(allocator: std.mem.Allocator, raw: []const []const u8) !Scan
     opts.roots = try roots_list.toOwnedSlice(allocator);
 
     return opts;
+}
+
+fn parseSizeMode(raw: []const u8) ?SizeMode {
+    if (std.ascii.eqlIgnoreCase(raw, "approx")) return .approx;
+    if (std.ascii.eqlIgnoreCase(raw, "exact")) return .exact;
+    if (std.ascii.eqlIgnoreCase(raw, "hybrid")) return .hybrid;
+    return null;
 }
 
 fn parseApply(allocator: std.mem.Allocator, raw: []const []const u8) !ApplyOptions {
@@ -384,24 +413,24 @@ fn resolveHomeDir(allocator: std.mem.Allocator) ![]const u8 {
 
 test "parse scan with defaults" {
     const allocator = std.testing.allocator;
-    const args = [_][]const u8{ "rm-folders", "scan", "--root", "." };
+    const args = [_][]const u8{ "rm-folders", "--root", "." };
     var cmd = try parseArgs(allocator, &args);
     defer cmd.deinit(allocator);
 
     switch (cmd) {
-        .scan => |scan| {
+        .interactive => |scan| {
             try std.testing.expect(scan.roots.len == 1);
             try std.testing.expect(scan.match_dirs.len >= 2);
             try std.testing.expect(scan.skip_dirs.len >= 3);
             try std.testing.expect(scan.workers >= 1);
             try std.testing.expect(scan.progress);
             try std.testing.expect(!scan.with_size);
+            try std.testing.expect(scan.size_mode == .approx);
             try std.testing.expect(!scan.snapshot_explicit);
             try std.testing.expect(!scan.no_snapshot);
             try std.testing.expect(scan.match_dirs.len >= 2);
             try std.testing.expect(scan.skip_dot_dirs);
         },
-        else => return error.TestUnexpectedResult,
     }
 }
 
@@ -414,8 +443,8 @@ test "parse defaults to interactive with current directory" {
     switch (cmd) {
         .interactive => |scan| {
             try std.testing.expect(scan.roots.len == 1);
+            try std.testing.expect(scan.size_mode == .approx);
         },
-        else => return error.TestUnexpectedResult,
     }
 }
 
@@ -467,6 +496,27 @@ test "parse skip path regex and no skip dot dirs" {
             try std.testing.expectEqualStrings(".*/\\..*", scan.skip_path_regexes[0]);
             try std.testing.expectEqualStrings(".*cache.*", scan.skip_path_regexes[1]);
             try std.testing.expect(!scan.skip_dot_dirs);
+        },
+    }
+}
+
+test "parse with-size and explicit size-mode" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{
+        "rm-folders",
+        "--dir",
+        ".",
+        "--with-size",
+        "--size-mode",
+        "exact",
+    };
+    var cmd = try parseArgs(allocator, &args);
+    defer cmd.deinit(allocator);
+
+    switch (cmd) {
+        .interactive => |scan| {
+            try std.testing.expect(scan.with_size);
+            try std.testing.expect(scan.size_mode == .exact);
         },
     }
 }

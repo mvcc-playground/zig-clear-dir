@@ -43,7 +43,7 @@ Atalhos do prompt:
 - `n` => pula item atual
 - `y-all` => apaga item atual e todos os restantes
 
-### Incluir calculo de tamanho (mais lento)
+### Incluir calculo de tamanho
 
 ```powershell
 zig build run -- --dir C:\Users\mathe\projetos --with-size
@@ -53,6 +53,12 @@ A saida mostra tamanhos em formato humano e em bytes:
 
 - `13.20 GB (14171541246 bytes)`
 
+Modo de calculo (`--size-mode`):
+
+- `approx` (padrao): mais rapido no Windows, resultado marcado como `estimated`.
+- `exact`: calculo completo, resultado marcado como `exact`.
+- `hybrid`: faz estimativa e depois refinamento exato.
+
 ## Opcoes Principais
 
 - `--dir <path>` ou `--path <path>`: diretorio alvo do scan.
@@ -61,6 +67,7 @@ A saida mostra tamanhos em formato humano e em bytes:
 - `--no-default-rules`: nao carregar regras padrao embutidas.`n- `--skip-path-regex <pattern>`: excluir por regex-lite de caminho (suporta `.*`).`n- `--no-skip-dot-dirs`: permite entrar em pastas que comecam com ponto.
 - `--workers auto|N`
 - `--with-size`
+- `--size-mode <approx|exact|hybrid>`
 - `--no-progress`
 - `--snapshot <path>`
 - `--no-snapshot`
@@ -68,7 +75,7 @@ A saida mostra tamanhos em formato humano e em bytes:
 Voce pode repetir `--match-dir` e `--skip-dir`, ou passar lista por virgula:
 
 ```powershell
-zig build run -- --dir C:\Users\mathe\projetos --match-dir node_modules,target,dist --skip-dir AppData,.git --skip-path-regex ".*/\\..*"
+zig build run -- --dir C:\Users\mathe\projetos --match-dir node_modules,target,dist --skip-dir AppData,.git --skip-path-regex ".*/\\..*" --with-size --size-mode approx
 ```
 
 Exemplo sem defaults embutidos:

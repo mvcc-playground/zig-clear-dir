@@ -1,9 +1,11 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Rules = @import("rules.zig").Rules;
+const SizeMode = @import("config.zig").SizeMode;
 const platform = @import("../platform/mod.zig");
 const discovery_report_interval: usize = 200;
 const sizing_report_interval: usize = 10;
+const MeasureMode = enum { approx, exact };
 
 pub const MatchEntry = struct {
     path: []const u8,
@@ -13,6 +15,7 @@ pub const MatchEntry = struct {
 pub const ScanResult = struct {
     entries: []MatchEntry,
     total_bytes: u64,
+    size_is_estimated: bool,
 
     pub fn deinit(self: *ScanResult, allocator: std.mem.Allocator) void {
         for (self.entries) |entry| allocator.free(entry.path);
@@ -28,6 +31,7 @@ pub fn scan(
     workers: usize,
     progress: bool,
     with_size: bool,
+    size_mode: SizeMode,
 ) !ScanResult {
     const candidates = try collectCandidates(allocator, roots, rules, progress);
     errdefer {
@@ -43,7 +47,7 @@ pub fn scan(
             std.debug.print("  - {s}\n", .{path});
         }
         if (with_size and candidates.len > 0) {
-            std.debug.print("progress: calculating sizes...\n", .{});
+            std.debug.print("progress: calculating sizes ({s})...\n", .{@tagName(size_mode)});
         }
     }
     if (!with_size) {
@@ -52,14 +56,31 @@ pub fn scan(
             entries[idx] = .{ .path = path, .bytes = 0 };
         }
         allocator.free(candidates);
-        return .{ .entries = entries, .total_bytes = 0 };
+        return .{ .entries = entries, .total_bytes = 0, .size_is_estimated = false };
     }
 
     const sizes = try allocator.alloc(u64, candidates.len);
     defer allocator.free(sizes);
     @memset(sizes, 0);
+    var is_estimated = false;
     if (candidates.len > 0) {
-        try measureSizes(allocator, candidates, sizes, workers, progress);
+        switch (size_mode) {
+            .approx => {
+                is_estimated = platform.size.approx_is_estimated;
+                try measureSizes(allocator, candidates, sizes, workers, progress, .approx);
+            },
+            .exact => {
+                is_estimated = false;
+                try measureSizes(allocator, candidates, sizes, workers, progress, .exact);
+            },
+            .hybrid => {
+                if (progress) std.debug.print("progress: sizing phase 1/2 (estimated)\n", .{});
+                try measureSizes(allocator, candidates, sizes, workers, progress, .approx);
+                if (progress) std.debug.print("progress: sizing phase 2/2 (exact refine)\n", .{});
+                try measureSizes(allocator, candidates, sizes, workers, progress, .exact);
+                is_estimated = false;
+            },
+        }
     }
 
     const entries = try allocator.alloc(MatchEntry, candidates.len);
@@ -70,7 +91,7 @@ pub fn scan(
     }
     allocator.free(candidates);
 
-    return .{ .entries = entries, .total_bytes = total };
+    return .{ .entries = entries, .total_bytes = total, .size_is_estimated = is_estimated };
 }
 
 fn lessThanPath(_: void, a: []const u8, b: []const u8) bool {
@@ -164,20 +185,29 @@ const MeasureContext = struct {
     first_error: ?anyerror = null,
     completed: usize = 0,
     progress: bool = false,
-    sub_workers: usize = 1,
+    mode: MeasureMode = .exact,
     lock: std.Thread.Mutex = .{},
 };
 
-fn measureSizes(allocator: std.mem.Allocator, paths: []const []const u8, sizes: []u64, workers: usize, progress: bool) !void {
+fn measureSizes(
+    allocator: std.mem.Allocator,
+    paths: []const []const u8,
+    sizes: []u64,
+    workers: usize,
+    progress: bool,
+    mode: MeasureMode,
+) !void {
+    if (paths.len == 0) return;
+
+    const effective_workers = effectiveSizingWorkers(workers, paths.len, mode);
     var pool: std.Thread.Pool = undefined;
-    try pool.init(.{ .allocator = allocator, .n_jobs = @max(@as(usize, 1), workers) });
+    try pool.init(.{ .allocator = allocator, .n_jobs = effective_workers });
     defer pool.deinit();
 
     var wg: std.Thread.WaitGroup = .{};
-    var context = MeasureContext{ .paths = paths, .sizes = sizes, .progress = progress };
+    var context = MeasureContext{ .paths = paths, .sizes = sizes, .progress = progress, .mode = mode };
 
-    const worker_count = @min(@max(@as(usize, 1), workers), paths.len);
-    context.sub_workers = @max(@as(usize, 1), @divFloor(@max(@as(usize, 1), workers), worker_count));
+    const worker_count = @min(effective_workers, paths.len);
     var i: usize = 0;
     while (i < worker_count) : (i += 1) {
         pool.spawnWg(&wg, measureWorker, .{&context});
@@ -191,13 +221,28 @@ fn measureSizes(allocator: std.mem.Allocator, paths: []const []const u8, sizes: 
     }
 }
 
+fn effectiveSizingWorkers(workers: usize, total_paths: usize, mode: MeasureMode) usize {
+    const w = @max(@as(usize, 1), workers);
+    const platform_limit = if (builtin.os.tag == .windows)
+        switch (mode) {
+            .approx => @as(usize, 8),
+            .exact => @as(usize, 4),
+        }
+    else
+        @as(usize, 16);
+    return @min(total_paths, @min(w, platform_limit));
+}
+
 fn measureWorker(context: *MeasureContext) void {
     while (true) {
         const idx_opt = getNextIndex(context);
         if (idx_opt == null) return;
 
         const idx = idx_opt.?;
-        const size = platform.size.dirSize(context.paths[idx], context.progress, context.sub_workers) catch |err| {
+        const size = switch (context.mode) {
+            .approx => platform.size.dirSizeApprox(context.paths[idx]),
+            .exact => platform.size.dirSizeExact(context.paths[idx]),
+        } catch |err| {
             context.lock.lock();
             defer context.lock.unlock();
             if (context.first_error == null) context.first_error = err;
@@ -252,12 +297,41 @@ test "scan prunes matched dir" {
     const root_path = try tmp.dir.realpath(".", &root_path_buf);
 
     const allocator = std.testing.allocator;
-    var rules = try Rules.init(allocator, &.{"node_modules"}, &.{});
+    var rules = try Rules.init(allocator, &.{"node_modules"}, &.{}, &.{}, true);
     defer rules.deinit();
 
-    var result = try scan(allocator, &.{root_path}, rules, 2, false, false);
+    var result = try scan(allocator, &.{root_path}, rules, 2, false, false, .approx);
     defer result.deinit(allocator);
 
     try std.testing.expect(result.entries.len == 1);
     try std.testing.expect(std.mem.endsWith(u8, result.entries[0].path, "node_modules"));
+}
+
+test "scan with-size mode reports precision flag" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("a/target");
+    var f = try tmp.dir.createFile("a/target/out.bin", .{});
+    defer f.close();
+    try f.writeAll("hello-size-mode");
+
+    var root_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_path = try tmp.dir.realpath(".", &root_path_buf);
+
+    const allocator = std.testing.allocator;
+    var rules = try Rules.init(allocator, &.{"target"}, &.{}, &.{}, true);
+    defer rules.deinit();
+
+    var approx_result = try scan(allocator, &.{root_path}, rules, 4, false, true, .approx);
+    defer approx_result.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), approx_result.entries.len);
+    try std.testing.expect(approx_result.entries[0].bytes > 0);
+    try std.testing.expectEqual(platform.size.approx_is_estimated, approx_result.size_is_estimated);
+
+    var exact_result = try scan(allocator, &.{root_path}, rules, 4, false, true, .exact);
+    defer exact_result.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), exact_result.entries.len);
+    try std.testing.expect(exact_result.entries[0].bytes > 0);
+    try std.testing.expect(!exact_result.size_is_estimated);
 }
