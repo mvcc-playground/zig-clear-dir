@@ -21,7 +21,14 @@ pub const ScanResult = struct {
     }
 };
 
-pub fn scan(allocator: std.mem.Allocator, roots: []const []const u8, rules: Rules, workers: usize, progress: bool) !ScanResult {
+pub fn scan(
+    allocator: std.mem.Allocator,
+    roots: []const []const u8,
+    rules: Rules,
+    workers: usize,
+    progress: bool,
+    with_size: bool,
+) !ScanResult {
     const candidates = try collectCandidates(allocator, roots, rules, progress);
     errdefer {
         for (candidates) |path| allocator.free(path);
@@ -42,10 +49,9 @@ pub fn scan(allocator: std.mem.Allocator, roots: []const []const u8, rules: Rule
 
     const sizes = try allocator.alloc(u64, candidates.len);
     defer allocator.free(sizes);
-
     @memset(sizes, 0);
 
-    if (candidates.len > 0) {
+    if (with_size and candidates.len > 0) {
         try measureSizes(allocator, candidates, sizes, workers, progress);
     }
 
@@ -409,7 +415,7 @@ test "scan prunes matched dir" {
     var rules = try Rules.init(allocator, &.{"node_modules"}, &.{});
     defer rules.deinit();
 
-    var result = try scan(allocator, &.{root_path}, rules, 2, false);
+    var result = try scan(allocator, &.{root_path}, rules, 2, false, false);
     defer result.deinit(allocator);
 
     try std.testing.expect(result.entries.len == 1);

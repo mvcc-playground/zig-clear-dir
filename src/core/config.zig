@@ -10,6 +10,7 @@ pub const ScanOptions = struct {
     snapshot_path: []const u8,
     workers: usize,
     progress: bool,
+    with_size: bool,
 
     pub fn deinit(self: *ScanOptions, allocator: std.mem.Allocator) void {
         freeStringSlice(allocator, self.roots);
@@ -65,7 +66,7 @@ pub fn printUsage(writer: anytype) !void {
         \\Usage:
         \\  rm-folders scan --root <path> [--root <path> ...]
         \\      [--match-dir <name> ...] [--skip-dir <name> ...]
-        \\      [--workers auto|N] [--snapshot <path>] [--no-progress]
+        \\      [--workers auto|N] [--snapshot <path>] [--no-progress] [--with-size]
         \\
         \\  rm-folders apply --snapshot <path> --confirm REMOVE [--dry-run]
         \\
@@ -104,6 +105,7 @@ fn parseScan(allocator: std.mem.Allocator, raw: []const []const u8) !ScanOptions
 
     var workers: usize = defaultWorkers();
     var progress = true;
+    var with_size = false;
 
     var i: usize = 0;
     while (i < raw.len) : (i += 1) {
@@ -149,6 +151,10 @@ fn parseScan(allocator: std.mem.Allocator, raw: []const []const u8) !ScanOptions
             progress = false;
             continue;
         }
+        if (std.mem.eql(u8, arg, "--with-size")) {
+            with_size = true;
+            continue;
+        }
         return error.InvalidArgs;
     }
 
@@ -168,6 +174,7 @@ fn parseScan(allocator: std.mem.Allocator, raw: []const []const u8) !ScanOptions
         .snapshot_path = snapshot_path.?,
         .workers = workers,
         .progress = progress,
+        .with_size = with_size,
     };
 }
 
@@ -257,6 +264,7 @@ test "parse scan with defaults" {
             try std.testing.expect(scan.skip_dirs.len >= 3);
             try std.testing.expect(scan.workers >= 1);
             try std.testing.expect(scan.progress);
+            try std.testing.expect(!scan.with_size);
         },
         else => return error.TestUnexpectedResult,
     }

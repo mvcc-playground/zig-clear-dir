@@ -30,7 +30,7 @@ pub fn main() !void {
             defer rules.deinit();
 
             const started = std.time.microTimestamp();
-            var result = try rm.scanner.scan(allocator, scan_opts.roots, rules, scan_opts.workers, scan_opts.progress);
+            var result = try rm.scanner.scan(allocator, scan_opts.roots, rules, scan_opts.workers, scan_opts.progress, scan_opts.with_size);
             defer result.deinit(allocator);
 
             try rm.snapshot.save(allocator, scan_opts, result);
@@ -40,10 +40,17 @@ pub fn main() !void {
             }
 
             const elapsed_us = std.time.microTimestamp() - started;
-            try stdout.print(
-                "\nFound {d} directories, total reclaimable: {d} bytes\nSnapshot: {s}\nElapsed: {d} ms\n",
-                .{ result.entries.len, result.total_bytes, scan_opts.snapshot_path, @divFloor(elapsed_us, 1000) },
-            );
+            if (scan_opts.with_size) {
+                try stdout.print(
+                    "\nFound {d} directories, total reclaimable: {d} bytes\nSnapshot: {s}\nElapsed: {d} ms\n",
+                    .{ result.entries.len, result.total_bytes, scan_opts.snapshot_path, @divFloor(elapsed_us, 1000) },
+                );
+            } else {
+                try stdout.print(
+                    "\nFound {d} directories (size not calculated)\nSnapshot: {s}\nElapsed: {d} ms\nUse --with-size to calculate bytes.\n",
+                    .{ result.entries.len, scan_opts.snapshot_path, @divFloor(elapsed_us, 1000) },
+                );
+            }
         },
         .apply => |apply_opts| {
             var loaded = try rm.snapshot.loadAndValidate(allocator, apply_opts.snapshot_path);
