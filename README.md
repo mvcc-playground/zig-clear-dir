@@ -53,35 +53,28 @@ A saida mostra tamanhos em formato humano e em bytes:
 
 - `13.20 GB (14171541246 bytes)`
 
-## Comandos Explicitos
+## Opcoes Principais
 
-### scan (nao remove)
-
-```powershell
-zig build run -- scan --root C:\Users\mathe\projetos
-```
-
-Opcoes principais:
-
-- `--root <path>` (pode repetir)
-- `--match-dir <nome>` (pode repetir)
-- `--skip-dir <nome>` (pode repetir)
+- `--dir <path>` ou `--path <path>`: diretorio alvo do scan.
+- `--match-dir <nome>`: nomes de pasta para procurar.
+- `--skip-dir <nome>`: nomes de pasta para ignorar.
+- `--no-default-rules`: nao carregar regras padrao embutidas.
 - `--workers auto|N`
 - `--with-size`
 - `--no-progress`
 - `--snapshot <path>`
 - `--no-snapshot`
 
-### apply (remove via snapshot)
+Voce pode repetir `--match-dir` e `--skip-dir`, ou passar lista por virgula:
 
 ```powershell
-zig build run -- apply --snapshot C:\temp\scan.json --confirm REMOVE
+zig build run -- --dir C:\Users\mathe\projetos --match-dir node_modules,target,dist --skip-dir AppData,.git
 ```
 
-Dry-run:
+Exemplo sem defaults embutidos:
 
 ```powershell
-zig build run -- apply --snapshot C:\temp\scan.json --confirm REMOVE --dry-run
+zig build run -- --dir C:\Users\mathe\projetos --no-default-rules --match-dir target,node_modules --skip-dir .git,.cache
 ```
 
 ## Snapshot
@@ -106,6 +99,10 @@ zig build run -- apply --snapshot C:\temp\scan.json --confirm REMOVE --dry-run
 - Trata `AccessDenied` com skip seguro durante scan.
 
 ## Defaults de Match/Skip
+
+Arquivo de configuracao padrao embutido no executavel:
+
+- `src/core/default_rules.zig`
 
 Match padrao:
 

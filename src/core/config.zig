@@ -1,5 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const defaults = @import("default_rules.zig");
+const lists = @import("string_lists.zig");
 
 pub const ConfirmToken = "REMOVE";
 
@@ -15,9 +17,9 @@ pub const ScanOptions = struct {
     with_size: bool,
 
     pub fn deinit(self: *ScanOptions, allocator: std.mem.Allocator) void {
-        freeStringSlice(allocator, self.roots);
-        freeStringSlice(allocator, self.match_dirs);
-        freeStringSlice(allocator, self.skip_dirs);
+        lists.freeStringSlice(allocator, self.roots);
+        lists.freeStringSlice(allocator, self.match_dirs);
+        lists.freeStringSlice(allocator, self.skip_dirs);
         allocator.free(self.snapshot_path);
         self.* = undefined;
     }
@@ -60,35 +62,29 @@ pub fn printUsage(writer: anytype) !void {
         \\Usage:
         \\  rm-folders [--dir <path>] [--path <path>] [scan options]
         \\      (default: scan + interactive delete prompt)
+        \\      [--no-default-rules]
         \\
     , .{});
 }
 
 fn parseScan(allocator: std.mem.Allocator, raw: []const []const u8) !ScanOptions {
     var roots_list: std.ArrayListUnmanaged([]const u8) = .empty;
-    errdefer freeArrayListStrings(allocator, &roots_list);
+    errdefer lists.freeArrayListStrings(allocator, &roots_list);
 
     var match_list: std.ArrayListUnmanaged([]const u8) = .empty;
-    errdefer freeArrayListStrings(allocator, &match_list);
+    errdefer lists.freeArrayListStrings(allocator, &match_list);
 
     var skip_list: std.ArrayListUnmanaged([]const u8) = .empty;
-    errdefer freeArrayListStrings(allocator, &skip_list);
+    errdefer lists.freeArrayListStrings(allocator, &skip_list);
 
-    try appendDup(allocator, &match_list, "node_modules");
-    try appendDup(allocator, &match_list, "target");
-
-    const default_skip = [_][]const u8{
-        ".git",
-        ".hg",
-        ".svn",
-        "System Volume Information",
-        "$RECYCLE.BIN",
-        ".zig-cache",
-        "zig-out",
-        "AppData",
-    };
-    for (default_skip) |name| {
-        try appendDup(allocator, &skip_list, name);
+    const use_defaults = !lists.hasFlag(raw, "--no-default-rules");
+    if (use_defaults) {
+        for (defaults.match_dirs) |name| {
+            try lists.appendDup(allocator, &match_list, name);
+        }
+        for (defaults.skip_dirs) |name| {
+            try lists.appendDup(allocator, &skip_list, name);
+        }
     }
 
     var snapshot_path: ?[]const u8 = null;
@@ -113,13 +109,16 @@ fn parseScan(allocator: std.mem.Allocator, raw: []const []const u8) !ScanOptions
         if (std.mem.eql(u8, arg, "--match-dir")) {
             i += 1;
             if (i >= raw.len) return error.MissingValue;
-            try appendDup(allocator, &match_list, raw[i]);
+            try lists.appendCsvOrSingle(allocator, &match_list, raw[i]);
             continue;
         }
         if (std.mem.eql(u8, arg, "--skip-dir")) {
             i += 1;
             if (i >= raw.len) return error.MissingValue;
-            try appendDup(allocator, &skip_list, raw[i]);
+            try lists.appendCsvOrSingle(allocator, &skip_list, raw[i]);
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--no-default-rules")) {
             continue;
         }
         if (std.mem.eql(u8, arg, "--workers")) {
@@ -179,7 +178,7 @@ fn parseInteractive(allocator: std.mem.Allocator, raw: []const []const u8) !Scan
     var opts = try parseScan(allocator, &.{ "--root", "." });
     errdefer opts.deinit(allocator);
 
-    freeStringSlice(allocator, opts.roots);
+    lists.freeStringSlice(allocator, opts.roots);
     opts.roots = try allocator.alloc([]const u8, 0);
 
     var roots_list: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -228,13 +227,20 @@ fn parseInteractive(allocator: std.mem.Allocator, raw: []const []const u8) !Scan
         if (std.mem.eql(u8, arg, "--match-dir")) {
             i += 1;
             if (i >= raw.len) return error.MissingValue;
-            opts.match_dirs = try appendOwnedString(allocator, opts.match_dirs, raw[i]);
+            opts.match_dirs = try lists.appendOwnedCsvOrSingle(allocator, opts.match_dirs, raw[i]);
             continue;
         }
         if (std.mem.eql(u8, arg, "--skip-dir")) {
             i += 1;
             if (i >= raw.len) return error.MissingValue;
-            opts.skip_dirs = try appendOwnedString(allocator, opts.skip_dirs, raw[i]);
+            opts.skip_dirs = try lists.appendOwnedCsvOrSingle(allocator, opts.skip_dirs, raw[i]);
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--no-default-rules")) {
+            lists.freeStringSlice(allocator, opts.match_dirs);
+            lists.freeStringSlice(allocator, opts.skip_dirs);
+            opts.match_dirs = try allocator.alloc([]const u8, 0);
+            opts.skip_dirs = try allocator.alloc([]const u8, 0);
             continue;
         }
         if (std.mem.eql(u8, arg, "--with-size")) {
@@ -298,29 +304,6 @@ fn parseApply(allocator: std.mem.Allocator, raw: []const []const u8) !ApplyOptio
     };
 }
 
-fn appendDup(allocator: std.mem.Allocator, list: *std.ArrayListUnmanaged([]const u8), value: []const u8) !void {
-    try list.append(allocator, try allocator.dupe(u8, value));
-}
-
-fn appendOwnedString(allocator: std.mem.Allocator, original: [][]const u8, value: []const u8) ![][]const u8 {
-    const out = try allocator.alloc([]const u8, original.len + 1);
-    errdefer allocator.free(out);
-    for (original, 0..) |item, idx| out[idx] = item;
-    out[original.len] = try allocator.dupe(u8, value);
-    allocator.free(original);
-    return out;
-}
-
-fn freeStringSlice(allocator: std.mem.Allocator, values: [][]const u8) void {
-    for (values) |v| allocator.free(v);
-    allocator.free(values);
-}
-
-fn freeArrayListStrings(allocator: std.mem.Allocator, list: *std.ArrayListUnmanaged([]const u8)) void {
-    for (list.items) |v| allocator.free(v);
-    list.deinit(allocator);
-}
-
 fn defaultWorkers() usize {
     const cpu = std.Thread.getCpuCount() catch 1;
     return @max(@as(usize, 1), @min(cpu, @as(usize, 32)));
@@ -381,6 +364,7 @@ test "parse scan with defaults" {
             try std.testing.expect(!scan.with_size);
             try std.testing.expect(!scan.snapshot_explicit);
             try std.testing.expect(!scan.no_snapshot);
+            try std.testing.expect(scan.match_dirs.len >= 2);
         },
         else => return error.TestUnexpectedResult,
     }
@@ -397,5 +381,32 @@ test "parse defaults to interactive with current directory" {
             try std.testing.expect(scan.roots.len == 1);
         },
         else => return error.TestUnexpectedResult,
+    }
+}
+
+test "parse scan with no default rules and csv args" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{
+        "rm-folders",
+        "--dir",
+        ".",
+        "--no-default-rules",
+        "--match-dir",
+        "dist,build",
+        "--skip-dir",
+        ".cache,temp",
+    };
+    var cmd = try parseArgs(allocator, &args);
+    defer cmd.deinit(allocator);
+
+    switch (cmd) {
+        .interactive => |scan| {
+            try std.testing.expectEqual(@as(usize, 2), scan.match_dirs.len);
+            try std.testing.expectEqual(@as(usize, 2), scan.skip_dirs.len);
+            try std.testing.expectEqualStrings("dist", scan.match_dirs[0]);
+            try std.testing.expectEqualStrings("build", scan.match_dirs[1]);
+            try std.testing.expectEqualStrings(".cache", scan.skip_dirs[0]);
+            try std.testing.expectEqualStrings("temp", scan.skip_dirs[1]);
+        },
     }
 }
