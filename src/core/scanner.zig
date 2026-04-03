@@ -178,7 +178,7 @@ fn measureWorker(context: *MeasureContext) void {
         if (idx_opt == null) return;
 
         const idx = idx_opt.?;
-        const size = sizeOfDir(context.paths[idx]) catch |err| {
+        const size = sizeOfDir(context.paths[idx], context.progress) catch |err| {
             context.lock.lock();
             defer context.lock.unlock();
             if (context.first_error == null) context.first_error = err;
@@ -210,25 +210,28 @@ fn getNextIndex(context: *MeasureContext) ?usize {
     return idx;
 }
 
-fn sizeOfDir(path: []const u8) !u64 {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+fn sizeOfDir(path: []const u8, progress: bool) !u64 {
+    var stack: std.ArrayListUnmanaged(std.fs.Dir) = .empty;
+    defer {
+        for (stack.items) |*open_dir| open_dir.close();
+        stack.deinit(std.heap.page_allocator);
+    }
 
-    var stack: std.ArrayListUnmanaged([]const u8) = .empty;
-    defer stack.deinit(allocator);
-
-    try stack.append(allocator, try allocator.dupe(u8, path));
+    const root_dir = platform.fs.openDir(path) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return 0,
+        error.AccessDenied, error.PermissionDenied => return 0,
+        else => return err,
+    };
+    try stack.append(std.heap.page_allocator, root_dir);
 
     var total: u64 = 0;
+    var visited_dirs: usize = 0;
+    var visited_files: usize = 0;
 
-    while (stack.pop()) |current| {
-        var dir = platform.fs.openDir(current) catch |err| switch (err) {
-            error.FileNotFound, error.NotDir => continue,
-            error.AccessDenied, error.PermissionDenied => continue,
-            else => return err,
-        };
+    while (stack.pop()) |item| {
+        var dir = item;
         defer dir.close();
+        visited_dirs += 1;
 
         var it = dir.iterate();
         while (true) {
@@ -237,19 +240,34 @@ fn sizeOfDir(path: []const u8) !u64 {
                 else => return err,
             };
             const entry = maybe_entry orelse break;
-            const child = try std.fs.path.join(allocator, &.{ current, entry.name });
 
             switch (entry.kind) {
                 .directory => {
-                    try stack.append(allocator, child);
+                    var child_dir = dir.openDir(entry.name, .{
+                        .iterate = true,
+                        .access_sub_paths = true,
+                        .no_follow = true,
+                    }) catch |err| switch (err) {
+                        error.AccessDenied, error.PermissionDenied => continue,
+                        error.FileNotFound, error.NotDir => continue,
+                        else => return err,
+                    };
+                    stack.append(std.heap.page_allocator, child_dir) catch |err| {
+                        child_dir.close();
+                        return err;
+                    };
                 },
                 .sym_link => {},
                 else => {
-                    const stat = std.fs.cwd().statFile(child) catch |err| switch (err) {
+                    const stat = dir.statFile(entry.name) catch |err| switch (err) {
                         error.AccessDenied, error.PermissionDenied, error.FileNotFound => continue,
                         else => continue,
                     };
                     total +|= stat.size;
+                    visited_files += 1;
+                    if (progress and visited_files % 50_000 == 0) {
+                        std.debug.print("progress: sizing working {s} (dirs {d}, files {d})\n", .{ path, visited_dirs, visited_files });
+                    }
                 },
             }
         }
