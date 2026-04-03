@@ -30,19 +30,6 @@ pub fn main() !void {
             const save_snapshot = !scan_opts.no_snapshot and (scan_opts.snapshot_explicit or !isLikelyZigBuildRun(argv0));
             try runScanAndInteractiveDelete(allocator, stdout, scan_opts, true, save_snapshot);
         },
-        .scan => |scan_opts| {
-            try runScanAndInteractiveDelete(allocator, stdout, scan_opts, false, !scan_opts.no_snapshot);
-        },
-        .apply => |apply_opts| {
-            var loaded = try rm.snapshot.loadAndValidate(allocator, apply_opts.snapshot_path);
-            defer loaded.deinit();
-
-            const report = try rm.remover.applySnapshot(stdout, apply_opts, loaded.data());
-            try stdout.print(
-                "\nProcessed {d} entries, affected {d}, total snapshot bytes {d}\n",
-                .{ report.total_entries, report.removed_entries, report.total_bytes },
-            );
-        },
     }
 
     try stdout.flush();
@@ -213,8 +200,5 @@ test "usage parsing defaults to interactive command" {
     const args = [_][]const u8{"rm-folders"};
     var cmd = try rm.config.parseArgs(allocator, &args);
     defer cmd.deinit(allocator);
-    switch (cmd) {
-        .interactive => {},
-        else => return error.TestUnexpectedResult,
-    }
+    _ = cmd.interactive;
 }

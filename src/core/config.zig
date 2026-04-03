@@ -37,14 +37,10 @@ pub const ApplyOptions = struct {
 
 pub const Command = union(enum) {
     interactive: ScanOptions,
-    scan: ScanOptions,
-    apply: ApplyOptions,
 
     pub fn deinit(self: *Command, allocator: std.mem.Allocator) void {
         switch (self.*) {
             .interactive => |*scan| scan.deinit(allocator),
-            .scan => |*scan| scan.deinit(allocator),
-            .apply => |*apply| apply.deinit(allocator),
         }
     }
 };
@@ -55,14 +51,6 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Comman
     if (args.len < 2) {
         return .{ .interactive = try parseInteractive(allocator, &.{}) };
     }
-
-    const cmd = args[1];
-    if (std.mem.eql(u8, cmd, "scan")) {
-        return .{ .scan = try parseScan(allocator, args[2..]) };
-    }
-    if (std.mem.eql(u8, cmd, "apply")) {
-        return .{ .apply = try parseApply(allocator, args[2..]) };
-    }
     return .{ .interactive = try parseInteractive(allocator, args[1..]) };
 }
 
@@ -72,12 +60,6 @@ pub fn printUsage(writer: anytype) !void {
         \\Usage:
         \\  rm-folders [--dir <path>] [--path <path>] [scan options]
         \\      (default: scan + interactive delete prompt)
-        \\
-        \\  rm-folders scan --root <path> [--root <path> ...]
-        \\      [--match-dir <name> ...] [--skip-dir <name> ...]
-        \\      [--workers auto|N] [--snapshot <path>] [--no-snapshot] [--no-progress] [--with-size]
-        \\
-        \\  rm-folders apply --snapshot <path> --confirm REMOVE [--dry-run]
         \\
     , .{});
 }
@@ -399,21 +381,6 @@ test "parse scan with defaults" {
             try std.testing.expect(!scan.with_size);
             try std.testing.expect(!scan.snapshot_explicit);
             try std.testing.expect(!scan.no_snapshot);
-        },
-        else => return error.TestUnexpectedResult,
-    }
-}
-
-test "parse apply" {
-    const allocator = std.testing.allocator;
-    const args = [_][]const u8{ "rm-folders", "apply", "--snapshot", "a.json", "--confirm", "REMOVE", "--dry-run" };
-    var cmd = try parseArgs(allocator, &args);
-    defer cmd.deinit(allocator);
-
-    switch (cmd) {
-        .apply => |apply| {
-            try std.testing.expect(apply.dry_run);
-            try std.testing.expectEqualStrings("REMOVE", apply.confirm);
         },
         else => return error.TestUnexpectedResult,
     }
