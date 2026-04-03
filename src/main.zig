@@ -30,7 +30,7 @@ pub fn main() !void {
             defer rules.deinit();
 
             const started = std.time.microTimestamp();
-            var result = try rm.scanner.scan(allocator, scan_opts.roots, rules, scan_opts.workers);
+            var result = try rm.scanner.scan(allocator, scan_opts.roots, rules, scan_opts.workers, scan_opts.progress);
             defer result.deinit(allocator);
 
             try rm.snapshot.save(allocator, scan_opts, result);

@@ -9,6 +9,7 @@ pub const ScanOptions = struct {
     skip_dirs: [][]const u8,
     snapshot_path: []const u8,
     workers: usize,
+    progress: bool,
 
     pub fn deinit(self: *ScanOptions, allocator: std.mem.Allocator) void {
         freeStringSlice(allocator, self.roots);
@@ -64,7 +65,7 @@ pub fn printUsage(writer: anytype) !void {
         \\Usage:
         \\  rm-folders scan --root <path> [--root <path> ...]
         \\      [--match-dir <name> ...] [--skip-dir <name> ...]
-        \\      [--workers auto|N] [--snapshot <path>]
+        \\      [--workers auto|N] [--snapshot <path>] [--no-progress]
         \\
         \\  rm-folders apply --snapshot <path> --confirm REMOVE [--dry-run]
         \\
@@ -84,7 +85,16 @@ fn parseScan(allocator: std.mem.Allocator, raw: []const []const u8) !ScanOptions
     try appendDup(allocator, &match_list, "node_modules");
     try appendDup(allocator, &match_list, "target");
 
-    const default_skip = [_][]const u8{ ".git", ".hg", ".svn", "System Volume Information", "$RECYCLE.BIN", ".zig-cache", "zig-out" };
+    const default_skip = [_][]const u8{
+        ".git",
+        ".hg",
+        ".svn",
+        "System Volume Information",
+        "$RECYCLE.BIN",
+        ".zig-cache",
+        "zig-out",
+        "AppData",
+    };
     for (default_skip) |name| {
         try appendDup(allocator, &skip_list, name);
     }
@@ -93,6 +103,7 @@ fn parseScan(allocator: std.mem.Allocator, raw: []const []const u8) !ScanOptions
     errdefer if (snapshot_path) |p| allocator.free(p);
 
     var workers: usize = defaultWorkers();
+    var progress = true;
 
     var i: usize = 0;
     while (i < raw.len) : (i += 1) {
@@ -134,6 +145,10 @@ fn parseScan(allocator: std.mem.Allocator, raw: []const []const u8) !ScanOptions
             snapshot_path = try absolutePath(allocator, raw[i]);
             continue;
         }
+        if (std.mem.eql(u8, arg, "--no-progress")) {
+            progress = false;
+            continue;
+        }
         return error.InvalidArgs;
     }
 
@@ -152,6 +167,7 @@ fn parseScan(allocator: std.mem.Allocator, raw: []const []const u8) !ScanOptions
         .skip_dirs = try skip_list.toOwnedSlice(allocator),
         .snapshot_path = snapshot_path.?,
         .workers = workers,
+        .progress = progress,
     };
 }
 
@@ -240,6 +256,7 @@ test "parse scan with defaults" {
             try std.testing.expect(scan.match_dirs.len >= 2);
             try std.testing.expect(scan.skip_dirs.len >= 3);
             try std.testing.expect(scan.workers >= 1);
+            try std.testing.expect(scan.progress);
         },
         else => return error.TestUnexpectedResult,
     }

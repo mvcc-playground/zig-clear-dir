@@ -1,6 +1,9 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Rules = @import("rules.zig").Rules;
 const platform = @import("../platform/mod.zig");
+const discovery_report_interval: usize = 200;
+const sizing_report_interval: usize = 10;
 
 pub const MatchEntry = struct {
     path: []const u8,
@@ -18,8 +21,8 @@ pub const ScanResult = struct {
     }
 };
 
-pub fn scan(allocator: std.mem.Allocator, roots: []const []const u8, rules: Rules, workers: usize) !ScanResult {
-    const candidates = try collectCandidates(allocator, roots, rules);
+pub fn scan(allocator: std.mem.Allocator, roots: []const []const u8, rules: Rules, workers: usize, progress: bool) !ScanResult {
+    const candidates = try collectCandidates(allocator, roots, rules, progress);
     errdefer {
         for (candidates) |path| allocator.free(path);
         allocator.free(candidates);
@@ -27,13 +30,23 @@ pub fn scan(allocator: std.mem.Allocator, roots: []const []const u8, rules: Rule
 
     std.sort.heap([]const u8, candidates, {}, lessThanPath);
 
+    if (progress) {
+        std.debug.print("found candidates ({d}):\n", .{candidates.len});
+        for (candidates) |path| {
+            std.debug.print("  - {s}\n", .{path});
+        }
+        if (candidates.len > 0) {
+            std.debug.print("progress: calculating sizes...\n", .{});
+        }
+    }
+
     const sizes = try allocator.alloc(u64, candidates.len);
     defer allocator.free(sizes);
 
     @memset(sizes, 0);
 
     if (candidates.len > 0) {
-        try measureSizes(allocator, candidates, sizes, workers);
+        try measureSizes(allocator, candidates, sizes, workers, progress);
     }
 
     const entries = try allocator.alloc(MatchEntry, candidates.len);
@@ -51,7 +64,7 @@ fn lessThanPath(_: void, a: []const u8, b: []const u8) bool {
     return std.mem.lessThan(u8, a, b);
 }
 
-fn collectCandidates(allocator: std.mem.Allocator, roots: []const []const u8, rules: Rules) ![][]const u8 {
+fn collectCandidates(allocator: std.mem.Allocator, roots: []const []const u8, rules: Rules, progress: bool) ![][]const u8 {
     var stack: std.ArrayListUnmanaged([]const u8) = .empty;
     defer {
         for (stack.items) |path| allocator.free(path);
@@ -68,24 +81,48 @@ fn collectCandidates(allocator: std.mem.Allocator, roots: []const []const u8, ru
         try stack.append(allocator, try allocator.dupe(u8, root));
     }
 
+    var scanned_dirs: usize = 0;
+    var matched_dirs: usize = 0;
+
     while (stack.pop()) |current| {
         defer allocator.free(current);
+        scanned_dirs += 1;
+        if (progress and scanned_dirs % discovery_report_interval == 0) {
+            std.debug.print("progress: scanned {d} dirs, matched {d}, queue {d}\n", .{ scanned_dirs, matched_dirs, stack.items.len });
+        }
 
         var dir = platform.fs.openDir(current) catch |err| switch (err) {
             error.FileNotFound, error.NotDir => continue,
+            error.AccessDenied, error.PermissionDenied => {
+                std.log.warn("skip (no permission): {s}", .{current});
+                continue;
+            },
             else => return err,
         };
         defer dir.close();
 
         var it = dir.iterate();
-        while (try it.next()) |entry| {
+        while (true) {
+            const maybe_entry = it.next() catch |err| switch (err) {
+                error.AccessDenied, error.PermissionDenied => {
+                    std.log.warn("skip listing (no permission): {s}", .{current});
+                    break;
+                },
+                else => return err,
+            };
+            const entry = maybe_entry orelse break;
             switch (entry.kind) {
                 .directory => {
                     if (rules.shouldSkipDir(entry.name)) continue;
 
                     const child = try std.fs.path.join(allocator, &.{ current, entry.name });
+                    if (shouldSkipWindowsHiddenOrSystem(child)) {
+                        allocator.free(child);
+                        continue;
+                    }
                     if (rules.shouldMatchDir(entry.name)) {
                         try candidates.append(allocator, child);
+                        matched_dirs += 1;
                     } else {
                         try stack.append(allocator, child);
                     }
@@ -96,6 +133,10 @@ fn collectCandidates(allocator: std.mem.Allocator, roots: []const []const u8, ru
         }
     }
 
+    if (progress) {
+        std.debug.print("progress: discovery complete (scanned {d} dirs, matched {d})\n", .{ scanned_dirs, matched_dirs });
+    }
+
     return try candidates.toOwnedSlice(allocator);
 }
 
@@ -104,16 +145,18 @@ const MeasureContext = struct {
     sizes: []u64,
     next_index: usize = 0,
     first_error: ?anyerror = null,
+    completed: usize = 0,
+    progress: bool = false,
     lock: std.Thread.Mutex = .{},
 };
 
-fn measureSizes(allocator: std.mem.Allocator, paths: []const []const u8, sizes: []u64, workers: usize) !void {
+fn measureSizes(allocator: std.mem.Allocator, paths: []const []const u8, sizes: []u64, workers: usize, progress: bool) !void {
     var pool: std.Thread.Pool = undefined;
     try pool.init(.{ .allocator = allocator, .n_jobs = @max(@as(usize, 1), workers) });
     defer pool.deinit();
 
     var wg: std.Thread.WaitGroup = .{};
-    var context = MeasureContext{ .paths = paths, .sizes = sizes };
+    var context = MeasureContext{ .paths = paths, .sizes = sizes, .progress = progress };
 
     const worker_count = @min(@max(@as(usize, 1), workers), paths.len);
     var i: usize = 0;
@@ -124,6 +167,9 @@ fn measureSizes(allocator: std.mem.Allocator, paths: []const []const u8, sizes: 
     wg.wait();
 
     if (context.first_error) |err| return err;
+    if (progress and paths.len > 0) {
+        std.debug.print("progress: sizing complete ({d}/{d})\n", .{ context.completed, paths.len });
+    }
 }
 
 fn measureWorker(context: *MeasureContext) void {
@@ -138,7 +184,17 @@ fn measureWorker(context: *MeasureContext) void {
             if (context.first_error == null) context.first_error = err;
             return;
         };
+        context.lock.lock();
         context.sizes[idx] = size;
+        context.completed += 1;
+        const completed = context.completed;
+        const total = context.paths.len;
+        const should_report = context.progress and (completed % sizing_report_interval == 0 or completed == total);
+        context.lock.unlock();
+
+        if (should_report) {
+            std.debug.print("progress: sizing {d}/{d}\n", .{ completed, total });
+        }
     }
 }
 
@@ -169,12 +225,18 @@ fn sizeOfDir(path: []const u8) !u64 {
     while (stack.pop()) |current| {
         var dir = platform.fs.openDir(current) catch |err| switch (err) {
             error.FileNotFound, error.NotDir => continue,
+            error.AccessDenied, error.PermissionDenied => continue,
             else => return err,
         };
         defer dir.close();
 
         var it = dir.iterate();
-        while (try it.next()) |entry| {
+        while (true) {
+            const maybe_entry = it.next() catch |err| switch (err) {
+                error.AccessDenied, error.PermissionDenied => break,
+                else => return err,
+            };
+            const entry = maybe_entry orelse break;
             const child = try std.fs.path.join(allocator, &.{ current, entry.name });
 
             switch (entry.kind) {
@@ -183,7 +245,10 @@ fn sizeOfDir(path: []const u8) !u64 {
                 },
                 .sym_link => {},
                 else => {
-                    const stat = std.fs.cwd().statFile(child) catch continue;
+                    const stat = std.fs.cwd().statFile(child) catch |err| switch (err) {
+                        error.AccessDenied, error.PermissionDenied, error.FileNotFound => continue,
+                        else => continue,
+                    };
                     total +|= stat.size;
                 },
             }
@@ -191,6 +256,15 @@ fn sizeOfDir(path: []const u8) !u64 {
     }
 
     return total;
+}
+
+fn shouldSkipWindowsHiddenOrSystem(path: []const u8) bool {
+    if (builtin.os.tag != .windows) return false;
+
+    const attrs = std.os.windows.GetFileAttributes(path) catch return false;
+    const hidden = attrs & std.os.windows.FILE_ATTRIBUTE_HIDDEN != 0;
+    const system = attrs & std.os.windows.FILE_ATTRIBUTE_SYSTEM != 0;
+    return hidden or system;
 }
 
 test "scan prunes matched dir" {
@@ -210,7 +284,7 @@ test "scan prunes matched dir" {
     var rules = try Rules.init(allocator, &.{"node_modules"}, &.{});
     defer rules.deinit();
 
-    var result = try scan(allocator, &.{root_path}, rules, 2);
+    var result = try scan(allocator, &.{root_path}, rules, 2, false);
     defer result.deinit(allocator);
 
     try std.testing.expect(result.entries.len == 1);
