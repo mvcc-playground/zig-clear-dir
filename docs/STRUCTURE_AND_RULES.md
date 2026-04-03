@@ -19,7 +19,7 @@ Nao existe mais modo separado `scan/apply` para uso normal do CLI. O fluxo princ
 : Entrada da CLI, execucao do fluxo interativo e prompt de confirmacao.
 
 - `src/core/config.zig`
-: Parse de argumentos e defaults de runtime (roots, flags, workers, snapshot, etc.).
+: Parse de argumentos e defaults de runtime (roots, flags, workers, etc.).
 
 - `src/core/default_rules.zig`
 : Regras padrao embutidas no executavel (`match_dirs`, `skip_dirs`, `skip_dot_dirs`, regexes padrao).
@@ -83,12 +83,7 @@ Por padrao, diretorios iniciados por `.` sao ignorados.
 
 Quando usado, regras padrao embutidas nao sao carregadas; voce define tudo por flags.
 
-## Snapshot
-
-- Default: `HOME/.rm-folders/snapshots/<timestamp>.json`
-- No modo `zig build run`, o app pode nao salvar snapshot automaticamente por default.
-- Para forcar: `--snapshot <path>`
-- Para desabilitar: `--no-snapshot`
+Nao existe modo separado de snapshot/apply no fluxo atual.
 
 ## Prompt Interativo
 

@@ -3,8 +3,6 @@ const builtin = @import("builtin");
 const defaults = @import("default_rules.zig");
 const lists = @import("string_lists.zig");
 
-pub const ConfirmToken = "REMOVE";
-
 pub const SizeMode = enum {
     approx,
     exact,
@@ -17,9 +15,6 @@ pub const ScanOptions = struct {
     skip_dirs: [][]const u8,
     skip_path_regexes: [][]const u8,
     skip_dot_dirs: bool,
-    snapshot_path: []const u8,
-    snapshot_explicit: bool,
-    no_snapshot: bool,
     workers: usize,
     delete_workers: usize,
     progress: bool,
@@ -31,19 +26,6 @@ pub const ScanOptions = struct {
         lists.freeStringSlice(allocator, self.match_dirs);
         lists.freeStringSlice(allocator, self.skip_dirs);
         lists.freeStringSlice(allocator, self.skip_path_regexes);
-        allocator.free(self.snapshot_path);
-        self.* = undefined;
-    }
-};
-
-pub const ApplyOptions = struct {
-    snapshot_path: []const u8,
-    confirm: []const u8,
-    dry_run: bool,
-
-    pub fn deinit(self: *ApplyOptions, allocator: std.mem.Allocator) void {
-        allocator.free(self.snapshot_path);
-        allocator.free(self.confirm);
         self.* = undefined;
     }
 };
@@ -107,16 +89,11 @@ fn parseScan(allocator: std.mem.Allocator, raw: []const []const u8) !ScanOptions
         }
     }
 
-    var snapshot_path: ?[]const u8 = null;
-    errdefer if (snapshot_path) |p| allocator.free(p);
-
     var workers: usize = defaultWorkers();
     var delete_workers: usize = defaultDeleteWorkers();
     var progress = true;
     var with_size = false;
     var size_mode: SizeMode = .approx;
-    var snapshot_explicit = false;
-    var no_snapshot = false;
 
     var i: usize = 0;
     while (i < raw.len) : (i += 1) {
@@ -175,18 +152,6 @@ fn parseScan(allocator: std.mem.Allocator, raw: []const []const u8) !ScanOptions
             }
             continue;
         }
-        if (std.mem.eql(u8, arg, "--snapshot")) {
-            i += 1;
-            if (i >= raw.len) return error.MissingValue;
-            if (snapshot_path) |old| allocator.free(old);
-            snapshot_path = try absolutePath(allocator, raw[i]);
-            snapshot_explicit = true;
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--no-snapshot")) {
-            no_snapshot = true;
-            continue;
-        }
         if (std.mem.eql(u8, arg, "--no-progress")) {
             progress = false;
             continue;
@@ -206,19 +171,12 @@ fn parseScan(allocator: std.mem.Allocator, raw: []const []const u8) !ScanOptions
 
     if (roots_list.items.len == 0) return error.InvalidArgs;
 
-    if (snapshot_path == null) {
-        snapshot_path = try defaultSnapshotPath(allocator);
-    }
-
     return .{
         .roots = try roots_list.toOwnedSlice(allocator),
         .match_dirs = try match_list.toOwnedSlice(allocator),
         .skip_dirs = try skip_list.toOwnedSlice(allocator),
         .skip_path_regexes = try skip_regex_list.toOwnedSlice(allocator),
         .skip_dot_dirs = skip_dot_dirs,
-        .snapshot_path = snapshot_path.?,
-        .snapshot_explicit = snapshot_explicit,
-        .no_snapshot = no_snapshot,
         .workers = workers,
         .delete_workers = delete_workers,
         .progress = progress,
@@ -252,18 +210,6 @@ fn parseInteractive(allocator: std.mem.Allocator, raw: []const []const u8) !Scan
             if (i >= raw.len) return error.MissingValue;
             const canonical = try canonicalizePath(allocator, raw[i]);
             try roots_list.append(allocator, canonical);
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--snapshot")) {
-            i += 1;
-            if (i >= raw.len) return error.MissingValue;
-            allocator.free(opts.snapshot_path);
-            opts.snapshot_path = try absolutePath(allocator, raw[i]);
-            opts.snapshot_explicit = true;
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--no-snapshot")) {
-            opts.no_snapshot = true;
             continue;
         }
         if (std.mem.eql(u8, arg, "--workers")) {
@@ -351,48 +297,6 @@ fn parseSizeMode(raw: []const u8) ?SizeMode {
     return null;
 }
 
-fn parseApply(allocator: std.mem.Allocator, raw: []const []const u8) !ApplyOptions {
-    var snapshot_path: ?[]const u8 = null;
-    errdefer if (snapshot_path) |p| allocator.free(p);
-
-    var confirm: ?[]const u8 = null;
-    errdefer if (confirm) |c| allocator.free(c);
-
-    var dry_run = false;
-
-    var i: usize = 0;
-    while (i < raw.len) : (i += 1) {
-        const arg = raw[i];
-        if (std.mem.eql(u8, arg, "--snapshot")) {
-            i += 1;
-            if (i >= raw.len) return error.MissingValue;
-            if (snapshot_path) |old| allocator.free(old);
-            snapshot_path = try absolutePath(allocator, raw[i]);
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--confirm")) {
-            i += 1;
-            if (i >= raw.len) return error.MissingValue;
-            if (confirm) |old| allocator.free(old);
-            confirm = try allocator.dupe(u8, raw[i]);
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--dry-run")) {
-            dry_run = true;
-            continue;
-        }
-        return error.InvalidArgs;
-    }
-
-    if (snapshot_path == null or confirm == null) return error.InvalidArgs;
-
-    return .{
-        .snapshot_path = snapshot_path.?,
-        .confirm = confirm.?,
-        .dry_run = dry_run,
-    };
-}
-
 fn defaultWorkers() usize {
     const cpu = std.Thread.getCpuCount() catch 1;
     return @max(@as(usize, 1), @min(cpu, @as(usize, 32)));
@@ -407,40 +311,6 @@ fn canonicalizePath(allocator: std.mem.Allocator, path: []const u8) ![]const u8 
     return try std.fs.cwd().realpathAlloc(allocator, path);
 }
 
-fn absolutePath(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
-    if (std.fs.path.isAbsolute(input)) return try allocator.dupe(u8, input);
-
-    const cwd = try std.fs.cwd().realpathAlloc(allocator, ".");
-    defer allocator.free(cwd);
-    return try std.fs.path.join(allocator, &.{ cwd, input });
-}
-
-fn defaultSnapshotPath(allocator: std.mem.Allocator) ![]const u8 {
-    const home = try resolveHomeDir(allocator);
-    defer allocator.free(home);
-    const now = std.time.timestamp();
-    const filename = try std.fmt.allocPrint(allocator, "{d}.json", .{now});
-    defer allocator.free(filename);
-    return try std.fs.path.join(allocator, &.{ home, ".rm-folders", "snapshots", filename });
-}
-
-fn resolveHomeDir(allocator: std.mem.Allocator) ![]const u8 {
-    return std.process.getEnvVarOwned(allocator, "HOME") catch |home_err| switch (home_err) {
-        error.EnvironmentVariableNotFound => {
-            return std.process.getEnvVarOwned(allocator, "USERPROFILE") catch |up_err| switch (up_err) {
-                error.EnvironmentVariableNotFound => blk: {
-                    const drive = try std.process.getEnvVarOwned(allocator, "HOMEDRIVE");
-                    defer allocator.free(drive);
-                    const path = try std.process.getEnvVarOwned(allocator, "HOMEPATH");
-                    defer allocator.free(path);
-                    break :blk try std.fs.path.join(allocator, &.{ drive, path });
-                },
-                else => |e| return e,
-            };
-        },
-        else => |e| return e,
-    };
-}
 
 test "parse scan with defaults" {
     const allocator = std.testing.allocator;
@@ -458,8 +328,6 @@ test "parse scan with defaults" {
             try std.testing.expect(scan.progress);
             try std.testing.expect(!scan.with_size);
             try std.testing.expect(scan.size_mode == .approx);
-            try std.testing.expect(!scan.snapshot_explicit);
-            try std.testing.expect(!scan.no_snapshot);
             try std.testing.expect(scan.match_dirs.len >= 2);
             try std.testing.expect(scan.skip_dot_dirs);
         },
@@ -570,4 +438,13 @@ test "parse explicit delete-workers" {
             try std.testing.expectEqual(@as(usize, 7), scan.delete_workers);
         },
     }
+}
+
+test "parse rejects legacy snapshot flags" {
+    const allocator = std.testing.allocator;
+    const bad1 = [_][]const u8{ "rm-folders", "--dir", ".", "--snapshot", "x.json" };
+    try std.testing.expectError(error.InvalidArgs, parseArgs(allocator, &bad1));
+
+    const bad2 = [_][]const u8{ "rm-folders", "--dir", ".", "--no-snapshot" };
+    try std.testing.expectError(error.InvalidArgs, parseArgs(allocator, &bad2));
 }

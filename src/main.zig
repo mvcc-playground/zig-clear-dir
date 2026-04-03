@@ -23,12 +23,9 @@ pub fn main() !void {
         return error.InvalidArgs;
     };
     defer command.deinit(allocator);
-    const argv0 = if (argv.len > 0) argv[0] else "";
-
     switch (command) {
         .interactive => |scan_opts| {
-            const save_snapshot = !scan_opts.no_snapshot and (scan_opts.snapshot_explicit or !isLikelyZigBuildRun(argv0));
-            try runScanAndInteractiveDelete(allocator, stdout, scan_opts, true, save_snapshot);
+            try runScanAndInteractiveDelete(allocator, stdout, scan_opts, true);
         },
     }
 
@@ -40,7 +37,6 @@ fn runScanAndInteractiveDelete(
     stdout: anytype,
     scan_opts: rm.config.ScanOptions,
     interactive: bool,
-    save_snapshot: bool,
 ) !void {
     var rules = try rm.rules.Rules.init(allocator, scan_opts.match_dirs, scan_opts.skip_dirs, scan_opts.skip_path_regexes, scan_opts.skip_dot_dirs);
     defer rules.deinit();
@@ -48,10 +44,6 @@ fn runScanAndInteractiveDelete(
     const started = std.time.microTimestamp();
     var result = try rm.scanner.scan(allocator, scan_opts.roots, rules, scan_opts.workers, scan_opts.progress, scan_opts.with_size, scan_opts.size_mode);
     defer result.deinit(allocator);
-
-    if (save_snapshot) {
-        try rm.snapshot.save(allocator, scan_opts, result);
-    }
 
     for (result.entries) |entry| {
         if (scan_opts.with_size) {
@@ -65,33 +57,17 @@ fn runScanAndInteractiveDelete(
 
     const elapsed_us = std.time.microTimestamp() - started;
     if (scan_opts.with_size) {
-        if (save_snapshot) {
-            try stdout.print(
-                "\nFound {d} directories, total reclaimable ({s}): ",
-                .{ result.entries.len, if (result.size_is_estimated) "estimated" else "exact" },
-            );
-            try printHumanBytes(stdout, result.total_bytes);
-            try stdout.print(" ({d} bytes)\nSnapshot: {s}\nElapsed: {d} ms\n", .{ result.total_bytes, scan_opts.snapshot_path, @divFloor(elapsed_us, 1000) });
-        } else {
-            try stdout.print(
-                "\nFound {d} directories, total reclaimable ({s}): ",
-                .{ result.entries.len, if (result.size_is_estimated) "estimated" else "exact" },
-            );
-            try printHumanBytes(stdout, result.total_bytes);
-            try stdout.print(" ({d} bytes)\nSnapshot: (not saved)\nElapsed: {d} ms\n", .{ result.total_bytes, @divFloor(elapsed_us, 1000) });
-        }
+        try stdout.print(
+            "\nFound {d} directories, total reclaimable ({s}): ",
+            .{ result.entries.len, if (result.size_is_estimated) "estimated" else "exact" },
+        );
+        try printHumanBytes(stdout, result.total_bytes);
+        try stdout.print(" ({d} bytes)\nElapsed: {d} ms\n", .{ result.total_bytes, @divFloor(elapsed_us, 1000) });
     } else {
-        if (save_snapshot) {
-            try stdout.print(
-                "\nFound {d} directories (size not calculated)\nSnapshot: {s}\nElapsed: {d} ms\nUse --with-size to calculate bytes.\n",
-                .{ result.entries.len, scan_opts.snapshot_path, @divFloor(elapsed_us, 1000) },
-            );
-        } else {
-            try stdout.print(
-                "\nFound {d} directories (size not calculated)\nSnapshot: (not saved)\nElapsed: {d} ms\nUse --with-size to calculate bytes.\n",
-                .{ result.entries.len, @divFloor(elapsed_us, 1000) },
-            );
-        }
+        try stdout.print(
+            "\nFound {d} directories (size not calculated)\nElapsed: {d} ms\nUse --with-size to calculate bytes.\n",
+            .{ result.entries.len, @divFloor(elapsed_us, 1000) },
+        );
     }
 
     if (!interactive or result.entries.len == 0) return;
@@ -128,10 +104,6 @@ fn runScanAndInteractiveDelete(
     try stdout.print(" ({d} bytes)\n", .{report.total_bytes});
 }
 
-fn isLikelyZigBuildRun(argv0: []const u8) bool {
-    return std.mem.indexOf(u8, argv0, ".zig-cache") != null;
-}
-
 const Choice = enum {
     yes_current,
     no_current,
@@ -150,9 +122,9 @@ fn selectEntriesInteractive(
     allocator: std.mem.Allocator,
     stdout: anytype,
     entries: []const rm.scanner.MatchEntry,
-) !std.ArrayListUnmanaged(rm.snapshot.SnapshotEntry) {
+) !std.ArrayListUnmanaged(rm.scanner.MatchEntry) {
     const mode = try readDeleteModePrompt(stdout);
-    var selected: std.ArrayListUnmanaged(rm.snapshot.SnapshotEntry) = .empty;
+    var selected: std.ArrayListUnmanaged(rm.scanner.MatchEntry) = .empty;
 
     switch (mode) {
         .all => {
@@ -175,7 +147,7 @@ fn selectEntriesInteractive(
 
 fn appendAllSelected(
     allocator: std.mem.Allocator,
-    selected: *std.ArrayListUnmanaged(rm.snapshot.SnapshotEntry),
+    selected: *std.ArrayListUnmanaged(rm.scanner.MatchEntry),
     entries: []const rm.scanner.MatchEntry,
 ) !void {
     for (entries) |entry| {
@@ -186,7 +158,7 @@ fn appendAllSelected(
 fn appendSelectedEach(
     allocator: std.mem.Allocator,
     stdout: anytype,
-    selected: *std.ArrayListUnmanaged(rm.snapshot.SnapshotEntry),
+    selected: *std.ArrayListUnmanaged(rm.scanner.MatchEntry),
     entries: []const rm.scanner.MatchEntry,
 ) !void {
     var all_remaining = false;
@@ -220,8 +192,8 @@ fn selectEntriesByDecisions(
     allocator: std.mem.Allocator,
     entries: []const rm.scanner.MatchEntry,
     decisions: []const Choice,
-) !std.ArrayListUnmanaged(rm.snapshot.SnapshotEntry) {
-    var selected: std.ArrayListUnmanaged(rm.snapshot.SnapshotEntry) = .empty;
+) !std.ArrayListUnmanaged(rm.scanner.MatchEntry) {
+    var selected: std.ArrayListUnmanaged(rm.scanner.MatchEntry) = .empty;
     var all_remaining = false;
 
     for (entries, 0..) |entry, idx| {
@@ -285,7 +257,7 @@ fn readChoice() !Choice {
     return .invalid;
 }
 
-fn calcSelectedTotal(entries: []const rm.snapshot.SnapshotEntry) u64 {
+fn calcSelectedTotal(entries: []const rm.scanner.MatchEntry) u64 {
     var total: u64 = 0;
     for (entries) |e| total +|= e.bytes;
     return total;
@@ -335,7 +307,7 @@ test "append all selected selects every entry" {
         .{ .path = "C:\\a\\node_modules", .bytes = 100 },
         .{ .path = "C:\\b\\target", .bytes = 200 },
     };
-    var out: std.ArrayListUnmanaged(rm.snapshot.SnapshotEntry) = .empty;
+    var out: std.ArrayListUnmanaged(rm.scanner.MatchEntry) = .empty;
     defer out.deinit(allocator);
 
     try appendAllSelected(allocator, &out, &entries);

@@ -74,8 +74,7 @@ Modo de calculo (`--size-mode`):
 - `--with-size`
 - `--size-mode <approx|exact|hybrid>`
 - `--no-progress`
-- `--snapshot <path>`
-- `--no-snapshot`
+- `--delete-workers auto|N`
 
 Voce pode repetir `--match-dir` e `--skip-dir`, ou passar lista por virgula:
 
@@ -88,13 +87,6 @@ Exemplo sem defaults embutidos:
 ```powershell
 zig build run -- --dir C:\Users\mathe\projetos --no-default-rules --match-dir target,node_modules --skip-dir .git,.cache
 ```
-
-## Snapshot
-
-- Caminho padrao: `HOME/.rm-folders/snapshots/<timestamp>.json`
-- No modo interativo com `zig build run`, por padrao nao salva snapshot automaticamente.
-- Para forcar salvar: use `--snapshot <path>`.
-- Para desabilitar explicitamente: `--no-snapshot`.
 
 ## Performance
 
