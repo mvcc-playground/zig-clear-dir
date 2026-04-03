@@ -108,6 +108,7 @@ fn runScanAndInteractiveDelete(
                 all_remaining = true;
                 break;
             }
+            try stdout.print("Invalid input. Use: y, n, or y-all.\n", .{});
         }
     }
 
@@ -128,6 +129,7 @@ const Choice = enum {
     yes_current,
     no_current,
     yes_all,
+    invalid,
 };
 
 fn readChoice() !Choice {
@@ -135,15 +137,14 @@ fn readChoice() !Choice {
     var stdin_reader = std.fs.File.stdin().reader(&stdin_buf);
     const stdin = &stdin_reader.interface;
 
-    var line_buf: [64]u8 = undefined;
-    const maybe_line = try stdin.readUntilDelimiterOrEof(&line_buf, '\n');
+    const maybe_line = try stdin.takeDelimiter('\n');
     const line = maybe_line orelse return .no_current;
     const trimmed = std.mem.trim(u8, line, " \t\r\n");
 
     if (std.ascii.eqlIgnoreCase(trimmed, "y-all")) return .yes_all;
     if (std.ascii.eqlIgnoreCase(trimmed, "y")) return .yes_current;
     if (std.ascii.eqlIgnoreCase(trimmed, "n")) return .no_current;
-    return .no_current;
+    return .invalid;
 }
 
 fn calcSelectedTotal(entries: []const rm.snapshot.SnapshotEntry) u64 {
