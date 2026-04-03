@@ -1,4 +1,4 @@
-# rm-folders
+# clear-dev-cache
 
 CLI em Zig para localizar e remover pastas de build/cache com foco em seguranca, velocidade e baixo uso de RAM.
 
@@ -20,7 +20,7 @@ zig build -Doptimize=ReleaseFast
 Binario gerado:
 
 ```text
-zig-out/bin/rm-folders.exe
+zig-out/bin/clear-dev-cache.exe
 ```
 
 ## Uso Rapido
@@ -118,5 +118,5 @@ Se `zig build run` falhar por problema intermitente de processo/pipe no ambiente
 
 ```powershell
 zig build -Doptimize=ReleaseFast
-.\zig-out\bin\rm-folders.exe --dir C:\Users\mathe\projetos
+.\zig-out\bin\clear-dev-cache.exe --dir C:\Users\mathe\projetos
 ```

@@ -1,5 +1,5 @@
 const std = @import("std");
-const rm = @import("rm_folders");
+const rm = @import("clear_dev_cache");
 
 pub fn main() !void {
     var gpa_state: std.heap.GeneralPurposeAllocator(.{}) = .init;
@@ -274,7 +274,7 @@ fn printHumanBytes(writer: anytype, bytes: u64) !void {
 
 test "usage parsing defaults to interactive command" {
     const allocator = std.testing.allocator;
-    const args = [_][]const u8{"rm-folders"};
+    const args = [_][]const u8{"clear-dev-cache"};
     var cmd = try rm.config.parseArgs(allocator, &args);
     defer cmd.deinit(allocator);
     _ = cmd.interactive;

@@ -43,9 +43,9 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Comman
 
 pub fn printUsage(writer: anytype) !void {
     try writer.print(
-        \\rm-folders - safe directory cleanup
+        \\clear-dev-cache - safe directory cleanup
         \\Usage:
-        \\  rm-folders [--dir <path>] [--path <path>] [scan options]
+        \\  clear-dev-cache [--dir <path>] [--path <path>] [scan options]
         \\      (default: scan + interactive delete prompt)
         \\      [--no-default-rules]
         \\      [--skip-path-regex <pattern>] [--no-skip-dot-dirs]
@@ -273,7 +273,7 @@ fn canonicalizePath(allocator: std.mem.Allocator, path: []const u8) ![]const u8 
 
 test "parse scan with defaults" {
     const allocator = std.testing.allocator;
-    const args = [_][]const u8{ "rm-folders", "--root", "." };
+    const args = [_][]const u8{ "clear-dev-cache", "--root", "." };
     var cmd = try parseArgs(allocator, &args);
     defer cmd.deinit(allocator);
 
@@ -293,7 +293,7 @@ test "parse scan with defaults" {
 
 test "parse defaults to interactive with current directory" {
     const allocator = std.testing.allocator;
-    const args = [_][]const u8{"rm-folders"};
+    const args = [_][]const u8{"clear-dev-cache"};
     var cmd = try parseArgs(allocator, &args);
     defer cmd.deinit(allocator);
 
@@ -307,7 +307,7 @@ test "parse defaults to interactive with current directory" {
 test "parse scan with no default rules and csv args" {
     const allocator = std.testing.allocator;
     const args = [_][]const u8{
-        "rm-folders",
+        "clear-dev-cache",
         "--dir",
         ".",
         "--no-default-rules",
@@ -336,7 +336,7 @@ test "parse scan with no default rules and csv args" {
 test "parse skip path regex and no skip dot dirs" {
     const allocator = std.testing.allocator;
     const args = [_][]const u8{
-        "rm-folders",
+        "clear-dev-cache",
         "--dir",
         ".",
         "--skip-path-regex",
@@ -359,7 +359,7 @@ test "parse skip path regex and no skip dot dirs" {
 test "parse explicit delete-workers" {
     const allocator = std.testing.allocator;
     const args = [_][]const u8{
-        "rm-folders",
+        "clear-dev-cache",
         "--dir",
         ".",
         "--delete-workers",
@@ -377,9 +377,9 @@ test "parse explicit delete-workers" {
 
 test "parse rejects legacy snapshot flags" {
     const allocator = std.testing.allocator;
-    const bad1 = [_][]const u8{ "rm-folders", "--dir", ".", "--snapshot", "x.json" };
+    const bad1 = [_][]const u8{ "clear-dev-cache", "--dir", ".", "--snapshot", "x.json" };
     try std.testing.expectError(error.InvalidArgs, parseArgs(allocator, &bad1));
 
-    const bad2 = [_][]const u8{ "rm-folders", "--dir", ".", "--no-snapshot" };
+    const bad2 = [_][]const u8{ "clear-dev-cache", "--dir", ".", "--no-snapshot" };
     try std.testing.expectError(error.InvalidArgs, parseArgs(allocator, &bad2));
 }
