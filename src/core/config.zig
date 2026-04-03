@@ -34,11 +34,13 @@ pub const ApplyOptions = struct {
 };
 
 pub const Command = union(enum) {
+    interactive: ScanOptions,
     scan: ScanOptions,
     apply: ApplyOptions,
 
     pub fn deinit(self: *Command, allocator: std.mem.Allocator) void {
         switch (self.*) {
+            .interactive => |*scan| scan.deinit(allocator),
             .scan => |*scan| scan.deinit(allocator),
             .apply => |*apply| apply.deinit(allocator),
         }
@@ -48,7 +50,9 @@ pub const Command = union(enum) {
 pub const ParseError = error{ InvalidArgs, MissingValue };
 
 pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Command {
-    if (args.len < 2) return error.InvalidArgs;
+    if (args.len < 2) {
+        return .{ .interactive = try parseInteractive(allocator, &.{}) };
+    }
 
     const cmd = args[1];
     if (std.mem.eql(u8, cmd, "scan")) {
@@ -57,13 +61,16 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Comman
     if (std.mem.eql(u8, cmd, "apply")) {
         return .{ .apply = try parseApply(allocator, args[2..]) };
     }
-    return error.InvalidArgs;
+    return .{ .interactive = try parseInteractive(allocator, args[1..]) };
 }
 
 pub fn printUsage(writer: anytype) !void {
     try writer.print(
         \\rm-folders - safe directory cleanup
         \\Usage:
+        \\  rm-folders [--dir <path>] [--path <path>] [scan options]
+        \\      (default: scan + interactive delete prompt)
+        \\
         \\  rm-folders scan --root <path> [--root <path> ...]
         \\      [--match-dir <name> ...] [--skip-dir <name> ...]
         \\      [--workers auto|N] [--snapshot <path>] [--no-progress] [--with-size]
@@ -178,6 +185,82 @@ fn parseScan(allocator: std.mem.Allocator, raw: []const []const u8) !ScanOptions
     };
 }
 
+fn parseInteractive(allocator: std.mem.Allocator, raw: []const []const u8) !ScanOptions {
+    var opts = try parseScan(allocator, &.{ "--root", "." });
+    errdefer opts.deinit(allocator);
+
+    freeStringSlice(allocator, opts.roots);
+    opts.roots = try allocator.alloc([]const u8, 0);
+
+    var roots_list: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer roots_list.deinit(allocator);
+
+    var i: usize = 0;
+    while (i < raw.len) : (i += 1) {
+        const arg = raw[i];
+        if (std.mem.eql(u8, arg, "--dir") or std.mem.eql(u8, arg, "--path")) {
+            i += 1;
+            if (i >= raw.len) return error.MissingValue;
+            const canonical = try canonicalizePath(allocator, raw[i]);
+            try roots_list.append(allocator, canonical);
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--root")) {
+            i += 1;
+            if (i >= raw.len) return error.MissingValue;
+            const canonical = try canonicalizePath(allocator, raw[i]);
+            try roots_list.append(allocator, canonical);
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--snapshot")) {
+            i += 1;
+            if (i >= raw.len) return error.MissingValue;
+            allocator.free(opts.snapshot_path);
+            opts.snapshot_path = try absolutePath(allocator, raw[i]);
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--workers")) {
+            i += 1;
+            if (i >= raw.len) return error.MissingValue;
+            if (std.mem.eql(u8, raw[i], "auto")) {
+                opts.workers = defaultWorkers();
+            } else {
+                opts.workers = try std.fmt.parseInt(usize, raw[i], 10);
+                opts.workers = @max(@as(usize, 1), @min(opts.workers, @as(usize, 128)));
+            }
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--match-dir")) {
+            i += 1;
+            if (i >= raw.len) return error.MissingValue;
+            opts.match_dirs = try appendOwnedString(allocator, opts.match_dirs, raw[i]);
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--skip-dir")) {
+            i += 1;
+            if (i >= raw.len) return error.MissingValue;
+            opts.skip_dirs = try appendOwnedString(allocator, opts.skip_dirs, raw[i]);
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--with-size")) {
+            opts.with_size = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--no-progress")) {
+            opts.progress = false;
+            continue;
+        }
+        return error.InvalidArgs;
+    }
+
+    if (roots_list.items.len == 0) {
+        try roots_list.append(allocator, try canonicalizePath(allocator, "."));
+    }
+    opts.roots = try roots_list.toOwnedSlice(allocator);
+
+    return opts;
+}
+
 fn parseApply(allocator: std.mem.Allocator, raw: []const []const u8) !ApplyOptions {
     var snapshot_path: ?[]const u8 = null;
     errdefer if (snapshot_path) |p| allocator.free(p);
@@ -222,6 +305,15 @@ fn parseApply(allocator: std.mem.Allocator, raw: []const []const u8) !ApplyOptio
 
 fn appendDup(allocator: std.mem.Allocator, list: *std.ArrayListUnmanaged([]const u8), value: []const u8) !void {
     try list.append(allocator, try allocator.dupe(u8, value));
+}
+
+fn appendOwnedString(allocator: std.mem.Allocator, original: [][]const u8, value: []const u8) ![][]const u8 {
+    const out = try allocator.alloc([]const u8, original.len + 1);
+    errdefer allocator.free(out);
+    for (original, 0..) |item, idx| out[idx] = item;
+    out[original.len] = try allocator.dupe(u8, value);
+    allocator.free(original);
+    return out;
 }
 
 fn freeStringSlice(allocator: std.mem.Allocator, values: [][]const u8) void {
@@ -280,6 +372,20 @@ test "parse apply" {
         .apply => |apply| {
             try std.testing.expect(apply.dry_run);
             try std.testing.expectEqualStrings("REMOVE", apply.confirm);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "parse defaults to interactive with current directory" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{"rm-folders"};
+    var cmd = try parseArgs(allocator, &args);
+    defer cmd.deinit(allocator);
+
+    switch (cmd) {
+        .interactive => |scan| {
+            try std.testing.expect(scan.roots.len == 1);
         },
         else => return error.TestUnexpectedResult,
     }

@@ -42,16 +42,23 @@ pub fn scan(
         for (candidates) |path| {
             std.debug.print("  - {s}\n", .{path});
         }
-        if (candidates.len > 0) {
+        if (with_size and candidates.len > 0) {
             std.debug.print("progress: calculating sizes...\n", .{});
         }
+    }
+    if (!with_size) {
+        const entries = try allocator.alloc(MatchEntry, candidates.len);
+        for (candidates, 0..) |path, idx| {
+            entries[idx] = .{ .path = path, .bytes = 0 };
+        }
+        allocator.free(candidates);
+        return .{ .entries = entries, .total_bytes = 0 };
     }
 
     const sizes = try allocator.alloc(u64, candidates.len);
     defer allocator.free(sizes);
     @memset(sizes, 0);
-
-    if (with_size and candidates.len > 0) {
+    if (candidates.len > 0) {
         try measureSizes(allocator, candidates, sizes, workers, progress);
     }
 

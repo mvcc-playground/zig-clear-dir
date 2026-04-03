@@ -15,19 +15,29 @@ pub fn applySnapshot(writer: anytype, opts: config.ApplyOptions, data: *const sn
         return error.InvalidConfirmationToken;
     }
 
-    const paths = try std.heap.page_allocator.alloc(snapshot.SnapshotEntry, data.entries.len);
+    return applyEntries(writer, data.roots, data.entries, data.total_bytes, opts.dry_run);
+}
+
+pub fn applyEntries(
+    writer: anytype,
+    roots: []const []const u8,
+    entries: []const snapshot.SnapshotEntry,
+    total_bytes: u64,
+    dry_run: bool,
+) !ApplyReport {
+    const paths = try std.heap.page_allocator.alloc(snapshot.SnapshotEntry, entries.len);
     defer std.heap.page_allocator.free(paths);
 
-    @memcpy(paths, data.entries);
+    @memcpy(paths, entries);
 
     std.sort.heap(snapshot.SnapshotEntry, paths, {}, byPathDesc);
 
     var removed: usize = 0;
 
     for (paths) |entry| {
-        try ensureSafePath(entry.path, data.roots);
+        try ensureSafePath(entry.path, roots);
 
-        if (opts.dry_run) {
+        if (dry_run) {
             try writer.print("[dry-run] would remove {s} ({d} bytes)\n", .{ entry.path, entry.bytes });
             removed += 1;
             continue;
@@ -40,9 +50,9 @@ pub fn applySnapshot(writer: anytype, opts: config.ApplyOptions, data: *const sn
     }
 
     return .{
-        .total_entries = data.entries.len,
+        .total_entries = entries.len,
         .removed_entries = removed,
-        .total_bytes = data.total_bytes,
+        .total_bytes = total_bytes,
     };
 }
 
