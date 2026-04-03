@@ -67,21 +67,31 @@ fn runScanAndInteractiveDelete(
     }
 
     for (result.entries) |entry| {
-        try stdout.print("{s}\t{d}\n", .{ entry.path, entry.bytes });
+        if (scan_opts.with_size) {
+            try stdout.print("{s}\t", .{entry.path});
+            try printHumanBytes(stdout, entry.bytes);
+            try stdout.print(" ({d} bytes)\n", .{entry.bytes});
+        } else {
+            try stdout.print("{s}\n", .{entry.path});
+        }
     }
 
     const elapsed_us = std.time.microTimestamp() - started;
     if (scan_opts.with_size) {
         if (save_snapshot) {
             try stdout.print(
-                "\nFound {d} directories, total reclaimable: {d} bytes\nSnapshot: {s}\nElapsed: {d} ms\n",
-                .{ result.entries.len, result.total_bytes, scan_opts.snapshot_path, @divFloor(elapsed_us, 1000) },
+                "\nFound {d} directories, total reclaimable: ",
+                .{result.entries.len},
             );
+            try printHumanBytes(stdout, result.total_bytes);
+            try stdout.print(" ({d} bytes)\nSnapshot: {s}\nElapsed: {d} ms\n", .{ result.total_bytes, scan_opts.snapshot_path, @divFloor(elapsed_us, 1000) });
         } else {
             try stdout.print(
-                "\nFound {d} directories, total reclaimable: {d} bytes\nSnapshot: (not saved)\nElapsed: {d} ms\n",
-                .{ result.entries.len, result.total_bytes, @divFloor(elapsed_us, 1000) },
+                "\nFound {d} directories, total reclaimable: ",
+                .{result.entries.len},
             );
+            try printHumanBytes(stdout, result.total_bytes);
+            try stdout.print(" ({d} bytes)\nSnapshot: (not saved)\nElapsed: {d} ms\n", .{ result.total_bytes, @divFloor(elapsed_us, 1000) });
         }
     } else {
         if (save_snapshot) {
@@ -139,9 +149,11 @@ fn runScanAndInteractiveDelete(
     const selected_total = calcSelectedTotal(selected.items);
     const report = try rm.remover.applyEntries(stdout, scan_opts.roots, selected.items, selected_total, false);
     try stdout.print(
-        "\nInteractive apply: selected {d}, removed {d}, bytes {d}\n",
-        .{ selected.items.len, report.removed_entries, report.total_bytes },
+        "\nInteractive apply: selected {d}, removed {d}, bytes ",
+        .{ selected.items.len, report.removed_entries },
     );
+    try printHumanBytes(stdout, report.total_bytes);
+    try stdout.print(" ({d} bytes)\n", .{report.total_bytes});
 }
 
 fn isLikelyZigBuildRun(argv0: []const u8) bool {
@@ -174,6 +186,26 @@ fn calcSelectedTotal(entries: []const rm.snapshot.SnapshotEntry) u64 {
     var total: u64 = 0;
     for (entries) |e| total +|= e.bytes;
     return total;
+}
+
+fn printHumanBytes(writer: anytype, bytes: u64) !void {
+    const kb: f64 = 1024.0;
+    const mb: f64 = kb * 1024.0;
+    const gb: f64 = mb * 1024.0;
+    const value: f64 = @floatFromInt(bytes);
+    if (value >= gb) {
+        try writer.print("{d:.2} GB", .{value / gb});
+        return;
+    }
+    if (value >= mb) {
+        try writer.print("{d:.2} MB", .{value / mb});
+        return;
+    }
+    if (value >= kb) {
+        try writer.print("{d:.2} KB", .{value / kb});
+        return;
+    }
+    try writer.print("{d} B", .{bytes});
 }
 
 test "usage parsing defaults to interactive command" {

@@ -6,3 +6,4 @@ else
     @import("posix_fs.zig");
 
 pub const fs = impl.Fs;
+pub const size = impl.Size;
