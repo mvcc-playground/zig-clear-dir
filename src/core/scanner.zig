@@ -129,6 +129,10 @@ fn collectCandidates(allocator: std.mem.Allocator, roots: []const []const u8, ru
                     if (rules.shouldSkipDir(entry.name)) continue;
 
                     const child = try std.fs.path.join(allocator, &.{ current, entry.name });
+                    if (rules.shouldSkipPath(child, entry.name)) {
+                        allocator.free(child);
+                        continue;
+                    }
                     if (shouldSkipWindowsHiddenOrSystem(child)) {
                         allocator.free(child);
                         continue;

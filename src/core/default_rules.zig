@@ -13,3 +13,6 @@ pub const skip_dirs: []const []const u8 = &.{
     "zig-out",
     "AppData",
 };
+
+pub const skip_dot_dirs: bool = true;
+pub const skip_path_regexes: []const []const u8 = &.{};

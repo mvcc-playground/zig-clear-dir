@@ -58,7 +58,7 @@ A saida mostra tamanhos em formato humano e em bytes:
 - `--dir <path>` ou `--path <path>`: diretorio alvo do scan.
 - `--match-dir <nome>`: nomes de pasta para procurar.
 - `--skip-dir <nome>`: nomes de pasta para ignorar.
-- `--no-default-rules`: nao carregar regras padrao embutidas.
+- `--no-default-rules`: nao carregar regras padrao embutidas.`n- `--skip-path-regex <pattern>`: excluir por regex-lite de caminho (suporta `.*`).`n- `--no-skip-dot-dirs`: permite entrar em pastas que comecam com ponto.
 - `--workers auto|N`
 - `--with-size`
 - `--no-progress`
@@ -68,7 +68,7 @@ A saida mostra tamanhos em formato humano e em bytes:
 Voce pode repetir `--match-dir` e `--skip-dir`, ou passar lista por virgula:
 
 ```powershell
-zig build run -- --dir C:\Users\mathe\projetos --match-dir node_modules,target,dist --skip-dir AppData,.git
+zig build run -- --dir C:\Users\mathe\projetos --match-dir node_modules,target,dist --skip-dir AppData,.git --skip-path-regex ".*/\\..*"
 ```
 
 Exemplo sem defaults embutidos:

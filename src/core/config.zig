@@ -9,6 +9,8 @@ pub const ScanOptions = struct {
     roots: [][]const u8,
     match_dirs: [][]const u8,
     skip_dirs: [][]const u8,
+    skip_path_regexes: [][]const u8,
+    skip_dot_dirs: bool,
     snapshot_path: []const u8,
     snapshot_explicit: bool,
     no_snapshot: bool,
@@ -20,6 +22,7 @@ pub const ScanOptions = struct {
         lists.freeStringSlice(allocator, self.roots);
         lists.freeStringSlice(allocator, self.match_dirs);
         lists.freeStringSlice(allocator, self.skip_dirs);
+        lists.freeStringSlice(allocator, self.skip_path_regexes);
         allocator.free(self.snapshot_path);
         self.* = undefined;
     }
@@ -63,6 +66,7 @@ pub fn printUsage(writer: anytype) !void {
         \\  rm-folders [--dir <path>] [--path <path>] [scan options]
         \\      (default: scan + interactive delete prompt)
         \\      [--no-default-rules]
+        \\      [--skip-path-regex <pattern>] [--no-skip-dot-dirs]
         \\
     , .{});
 }
@@ -76,14 +80,20 @@ fn parseScan(allocator: std.mem.Allocator, raw: []const []const u8) !ScanOptions
 
     var skip_list: std.ArrayListUnmanaged([]const u8) = .empty;
     errdefer lists.freeArrayListStrings(allocator, &skip_list);
+    var skip_regex_list: std.ArrayListUnmanaged([]const u8) = .empty;
+    errdefer lists.freeArrayListStrings(allocator, &skip_regex_list);
 
     const use_defaults = !lists.hasFlag(raw, "--no-default-rules");
+    var skip_dot_dirs = defaults.skip_dot_dirs;
     if (use_defaults) {
         for (defaults.match_dirs) |name| {
             try lists.appendDup(allocator, &match_list, name);
         }
         for (defaults.skip_dirs) |name| {
             try lists.appendDup(allocator, &skip_list, name);
+        }
+        for (defaults.skip_path_regexes) |regex| {
+            try lists.appendDup(allocator, &skip_regex_list, regex);
         }
     }
 
@@ -116,6 +126,16 @@ fn parseScan(allocator: std.mem.Allocator, raw: []const []const u8) !ScanOptions
             i += 1;
             if (i >= raw.len) return error.MissingValue;
             try lists.appendCsvOrSingle(allocator, &skip_list, raw[i]);
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--skip-path-regex")) {
+            i += 1;
+            if (i >= raw.len) return error.MissingValue;
+            try lists.appendCsvOrSingle(allocator, &skip_regex_list, raw[i]);
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--no-skip-dot-dirs")) {
+            skip_dot_dirs = false;
             continue;
         }
         if (std.mem.eql(u8, arg, "--no-default-rules")) {
@@ -165,6 +185,8 @@ fn parseScan(allocator: std.mem.Allocator, raw: []const []const u8) !ScanOptions
         .roots = try roots_list.toOwnedSlice(allocator),
         .match_dirs = try match_list.toOwnedSlice(allocator),
         .skip_dirs = try skip_list.toOwnedSlice(allocator),
+        .skip_path_regexes = try skip_regex_list.toOwnedSlice(allocator),
+        .skip_dot_dirs = skip_dot_dirs,
         .snapshot_path = snapshot_path.?,
         .snapshot_explicit = snapshot_explicit,
         .no_snapshot = no_snapshot,
@@ -236,11 +258,23 @@ fn parseInteractive(allocator: std.mem.Allocator, raw: []const []const u8) !Scan
             opts.skip_dirs = try lists.appendOwnedCsvOrSingle(allocator, opts.skip_dirs, raw[i]);
             continue;
         }
+        if (std.mem.eql(u8, arg, "--skip-path-regex")) {
+            i += 1;
+            if (i >= raw.len) return error.MissingValue;
+            opts.skip_path_regexes = try lists.appendOwnedCsvOrSingle(allocator, opts.skip_path_regexes, raw[i]);
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--no-skip-dot-dirs")) {
+            opts.skip_dot_dirs = false;
+            continue;
+        }
         if (std.mem.eql(u8, arg, "--no-default-rules")) {
             lists.freeStringSlice(allocator, opts.match_dirs);
             lists.freeStringSlice(allocator, opts.skip_dirs);
+            lists.freeStringSlice(allocator, opts.skip_path_regexes);
             opts.match_dirs = try allocator.alloc([]const u8, 0);
             opts.skip_dirs = try allocator.alloc([]const u8, 0);
+            opts.skip_path_regexes = try allocator.alloc([]const u8, 0);
             continue;
         }
         if (std.mem.eql(u8, arg, "--with-size")) {
@@ -365,6 +399,7 @@ test "parse scan with defaults" {
             try std.testing.expect(!scan.snapshot_explicit);
             try std.testing.expect(!scan.no_snapshot);
             try std.testing.expect(scan.match_dirs.len >= 2);
+            try std.testing.expect(scan.skip_dot_dirs);
         },
         else => return error.TestUnexpectedResult,
     }
@@ -407,6 +442,31 @@ test "parse scan with no default rules and csv args" {
             try std.testing.expectEqualStrings("build", scan.match_dirs[1]);
             try std.testing.expectEqualStrings(".cache", scan.skip_dirs[0]);
             try std.testing.expectEqualStrings("temp", scan.skip_dirs[1]);
+            try std.testing.expectEqual(@as(usize, 0), scan.skip_path_regexes.len);
+            try std.testing.expect(scan.skip_dot_dirs);
+        },
+    }
+}
+
+test "parse skip path regex and no skip dot dirs" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{
+        "rm-folders",
+        "--dir",
+        ".",
+        "--skip-path-regex",
+        ".*/\\..*,.*cache.*",
+        "--no-skip-dot-dirs",
+    };
+    var cmd = try parseArgs(allocator, &args);
+    defer cmd.deinit(allocator);
+
+    switch (cmd) {
+        .interactive => |scan| {
+            try std.testing.expectEqual(@as(usize, 2), scan.skip_path_regexes.len);
+            try std.testing.expectEqualStrings(".*/\\..*", scan.skip_path_regexes[0]);
+            try std.testing.expectEqualStrings(".*cache.*", scan.skip_path_regexes[1]);
+            try std.testing.expect(!scan.skip_dot_dirs);
         },
     }
 }

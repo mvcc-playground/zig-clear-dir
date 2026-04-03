@@ -42,7 +42,7 @@ fn runScanAndInteractiveDelete(
     interactive: bool,
     save_snapshot: bool,
 ) !void {
-    var rules = try rm.rules.Rules.init(allocator, scan_opts.match_dirs, scan_opts.skip_dirs);
+    var rules = try rm.rules.Rules.init(allocator, scan_opts.match_dirs, scan_opts.skip_dirs, scan_opts.skip_path_regexes, scan_opts.skip_dot_dirs);
     defer rules.deinit();
 
     const started = std.time.microTimestamp();
