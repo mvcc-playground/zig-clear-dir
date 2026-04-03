@@ -1,2 +1,8 @@
 [tools]
 zig = "0.15.2"
+
+[tasks.build]
+run = "zig build -Doptimize=ReleaseFast"
+
+[tasks.test]
+run = "zig build test"
