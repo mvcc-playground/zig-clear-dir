@@ -11,9 +11,10 @@ pub struct ScanRequest {
     pub active_targets: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum ScanMode {
     Fast,
+    #[default]
     Full,
 }
 
@@ -79,4 +80,17 @@ impl Default for AppLearningState {
             stats: LearningStats::default(),
         }
     }
+}
+
+/// UI session state persisted across restarts.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionState {
+    /// Last folder the user scanned.
+    pub last_root: Option<PathBuf>,
+    /// Last scan mode selected.
+    pub last_scan_mode: ScanMode,
+    /// Target names the user has unchecked (disabled) in the UI.
+    pub disabled_targets: Vec<String>,
+    /// Paths that were checked in the last result view.
+    pub last_selected_paths: Vec<PathBuf>,
 }

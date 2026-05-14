@@ -3,7 +3,8 @@ use application::{CleanerApp, ScanProgressPort, ScanProgressSnapshot};
 use domain::{CleanRequest, CleanResult, ScanMode, ScanResult, default_targets_vec};
 use eframe::egui::{self, Align, Color32, Layout, RichText};
 use platform::{NativeCleaner, NativeScanner, system_excluded_roots};
-use preferences::JsonLearningStore;
+use domain::SessionState;
+use preferences::SqliteStore;
 use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -15,8 +16,10 @@ use std::time::{Duration, Instant};
 fn main() -> Result<()> {
     let scanner = Arc::new(NativeScanner);
     let cleaner = Arc::new(NativeCleaner);
-    let learning = Arc::new(JsonLearningStore::new());
-    let app = Arc::new(CleanerApp::new(scanner, cleaner, learning));
+    // SqliteStore implements both LearningStorePort and SessionStatePort.
+    // Clone the Arc so both ports share the same connection pool.
+    let store = Arc::new(SqliteStore::new()?);
+    let app = Arc::new(CleanerApp::new(scanner, cleaner, store.clone(), store));
 
     let mut native_options = eframe::NativeOptions::default();
     native_options.viewport = egui::ViewportBuilder::default()
@@ -149,9 +152,18 @@ struct DesktopCleanerUi {
 
 impl DesktopCleanerUi {
     fn new(app: Arc<CleanerApp>) -> Self {
+        let session = app.load_session().unwrap_or_default();
+
         let (targets_list, initial_status) = match app.load_learning() {
             Ok(learning) => {
-                let list = build_targets_list(&learning);
+                let disabled: HashSet<String> =
+                    session.disabled_targets.iter().cloned().collect();
+                let mut list = build_targets_list(&learning);
+                for e in &mut list {
+                    if disabled.contains(&e.name) {
+                        e.enabled = false;
+                    }
+                }
                 (list, "Defina a pasta raiz e clique em Iniciar Scan".to_string())
             }
             Err(e) => {
@@ -164,14 +176,20 @@ impl DesktopCleanerUi {
             }
         };
 
+        let root_path = session
+            .last_root
+            .as_deref()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
         Self {
             app,
             step: Step::Configure,
             status: initial_status,
-            root_path: String::new(),
+            root_path,
             targets_list,
             new_target_input: String::new(),
-            selected_mode: ScanMode::Full,
+            selected_mode: session.last_scan_mode,
             scan_rx: None,
             scan_progress_rx: None,
             clean_rx: None,
@@ -269,6 +287,20 @@ impl DesktopCleanerUi {
             .map(|e| e.name.clone())
             .collect();
 
+        let disabled_targets: Vec<String> = self
+            .targets_list
+            .iter()
+            .filter(|e| !e.enabled)
+            .map(|e| e.name.clone())
+            .collect();
+
+        let _ = self.app.save_session(&SessionState {
+            last_root: Some(root_path.clone()),
+            last_scan_mode: self.selected_mode,
+            disabled_targets,
+            last_selected_paths: Vec::new(),
+        });
+
         let app = self.app.clone();
         let (tx, rx) = mpsc::channel();
         let (progress_tx, progress_rx) = mpsc::channel();
@@ -305,6 +337,19 @@ impl DesktopCleanerUi {
         self.clean_total = selected_paths.len();
         self.status = format!("Removendo {} itens...", selected_paths.len());
         self.is_cleaning = true;
+
+        let _ = self.app.save_session(&SessionState {
+            last_root: Some(PathBuf::from(root.trim())),
+            last_scan_mode: self.active_scan_mode,
+            disabled_targets: self
+                .targets_list
+                .iter()
+                .filter(|e| !e.enabled)
+                .map(|e| e.name.clone())
+                .collect(),
+            last_selected_paths: selected_paths.clone(),
+        });
+
         let app = self.app.clone();
         let (tx, rx) = mpsc::channel();
         self.clean_rx = Some(rx);

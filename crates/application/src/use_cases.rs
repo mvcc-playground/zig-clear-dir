@@ -1,8 +1,8 @@
-use crate::{CleanerPort, LearningStorePort, ScanProgressPort, ScannerPort};
+use crate::{CleanerPort, LearningStorePort, ScanProgressPort, ScannerPort, SessionStatePort};
 use anyhow::Result;
 use domain::{
     AppLearningState, CleanRequest, CleanResult, GarbageRules, ScanMode, ScanRequest, ScanResult,
-    default_targets_vec,
+    SessionState, default_targets_vec,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,6 +11,7 @@ pub struct CleanerApp {
     scanner: Arc<dyn ScannerPort>,
     cleaner: Arc<dyn CleanerPort>,
     learning_store: Arc<dyn LearningStorePort>,
+    session_store: Arc<dyn SessionStatePort>,
 }
 
 impl CleanerApp {
@@ -18,16 +19,21 @@ impl CleanerApp {
         scanner: Arc<dyn ScannerPort>,
         cleaner: Arc<dyn CleanerPort>,
         learning_store: Arc<dyn LearningStorePort>,
+        session_store: Arc<dyn SessionStatePort>,
     ) -> Self {
-        Self {
-            scanner,
-            cleaner,
-            learning_store,
-        }
+        Self { scanner, cleaner, learning_store, session_store }
     }
 
     pub fn load_learning(&self) -> Result<AppLearningState> {
         self.learning_store.load()
+    }
+
+    pub fn load_session(&self) -> Result<SessionState> {
+        self.session_store.load_session()
+    }
+
+    pub fn save_session(&self, state: &SessionState) -> Result<()> {
+        self.session_store.save_session(state)
     }
 
     pub fn scan_with_mode(&self, root: PathBuf, mode: ScanMode) -> Result<ScanResult> {
@@ -53,10 +59,7 @@ impl CleanerApp {
         let mut candidates = self.scanner.scan(&request, &learning, progress)?;
         candidates.sort_by(|a, b| b.bytes.cmp(&a.bytes));
         let total_bytes = candidates.iter().map(|v| v.bytes).sum();
-        Ok(ScanResult {
-            candidates,
-            total_bytes,
-        })
+        Ok(ScanResult { candidates, total_bytes })
     }
 
     pub fn clean(&self, request: CleanRequest) -> Result<CleanResult> {
@@ -117,8 +120,8 @@ impl CleanerApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CleanerPort, LearningStorePort, ScannerPort};
-    use domain::{CandidateEntry, LearningStats};
+    use crate::{CleanerPort, LearningStorePort, ScannerPort, SessionStatePort};
+    use domain::{CandidateEntry, LearningStats, SessionState};
     use std::path::PathBuf;
     use std::sync::Mutex;
 
@@ -159,13 +162,25 @@ mod tests {
         }
     }
 
+    struct MockSessionStore {
+        state: Mutex<SessionState>,
+    }
+    impl SessionStatePort for MockSessionStore {
+        fn load_session(&self) -> Result<SessionState> {
+            Ok(self.state.lock().expect("lock").clone())
+        }
+        fn save_session(&self, state: &SessionState) -> Result<()> {
+            *self.state.lock().expect("lock") = state.clone();
+            Ok(())
+        }
+    }
+
     fn app_with_state(state: AppLearningState) -> CleanerApp {
         CleanerApp::new(
             Arc::new(MockScanner),
             Arc::new(MockCleaner),
-            Arc::new(MockStore {
-                state: Mutex::new(state),
-            }),
+            Arc::new(MockStore { state: Mutex::new(state) }),
+            Arc::new(MockSessionStore { state: Mutex::new(SessionState::default()) }),
         )
     }
 
@@ -201,5 +216,35 @@ mod tests {
         let _ = app.scan_with_mode(PathBuf::from("C:\\tmp"), ScanMode::Full);
         let learning = app.load_learning().expect("load");
         assert!(!learning.recent_roots.is_empty());
+    }
+
+    #[test]
+    fn save_and_load_session_roundtrip() {
+        let app = app_with_state(AppLearningState::default());
+        let session = SessionState {
+            last_root: Some(PathBuf::from("C:\\projects")),
+            last_scan_mode: ScanMode::Fast,
+            disabled_targets: vec!["dist".into()],
+            last_selected_paths: vec![PathBuf::from("C:\\projects\\node_modules")],
+        };
+        app.save_session(&session).expect("save");
+        let loaded = app.load_session().expect("load");
+        assert_eq!(loaded.last_root, session.last_root);
+        assert_eq!(loaded.last_scan_mode, session.last_scan_mode);
+        assert_eq!(loaded.disabled_targets, session.disabled_targets);
+        assert_eq!(loaded.last_selected_paths, session.last_selected_paths);
+    }
+
+    #[test]
+    fn clean_increments_stats() {
+        let app = app_with_state(AppLearningState::default());
+        app.clean(CleanRequest {
+            scan_root: PathBuf::from("C:\\tmp"),
+            selected_paths: Vec::new(),
+            selected_bytes: Vec::new(),
+        })
+        .expect("clean");
+        let learning = app.load_learning().expect("load");
+        assert_eq!(learning.stats.runs, 1);
     }
 }

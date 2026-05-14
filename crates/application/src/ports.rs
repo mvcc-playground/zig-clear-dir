@@ -1,5 +1,5 @@
 use anyhow::Result;
-use domain::{AppLearningState, CandidateEntry, CleanRequest, CleanResult, ScanRequest};
+use domain::{AppLearningState, CandidateEntry, CleanRequest, CleanResult, ScanRequest, SessionState};
 
 #[derive(Debug, Clone, Copy)]
 pub struct ScanProgressSnapshot {
@@ -30,4 +30,12 @@ pub trait CleanerPort: Send + Sync {
 pub trait LearningStorePort: Send + Sync {
     fn load(&self) -> Result<AppLearningState>;
     fn save(&self, state: &AppLearningState) -> Result<()>;
+}
+
+/// Persists UI session state across restarts: last root, scan mode,
+/// disabled targets, and last selection. Segregated from LearningStorePort
+/// so callers (CLI, TUI) that don't need session state don't depend on it.
+pub trait SessionStatePort: Send + Sync {
+    fn load_session(&self) -> Result<SessionState>;
+    fn save_session(&self, state: &SessionState) -> Result<()>;
 }
