@@ -141,6 +141,7 @@ mod tests {
                 removed_count: 0,
                 removed_bytes: 0,
                 removed_paths: Vec::new(),
+                errors: Vec::new(),
             })
         }
     }

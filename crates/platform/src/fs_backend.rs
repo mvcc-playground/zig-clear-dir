@@ -39,16 +39,13 @@ impl ScannerPort for NativeScanner {
 
         let out = pending
             .into_par_iter()
-            .map(|p| -> Result<CandidateEntry> {
-                let size = dir_size(&p.path)?;
-                Ok(CandidateEntry {
-                    path: p.path,
-                    bytes: size,
-                    kind: p.kind,
-                    selected: true,
-                })
+            .map(|p| CandidateEntry {
+                bytes: dir_size(&p.path),
+                path: p.path,
+                kind: p.kind,
+                selected: true,
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Vec<_>>();
 
         Ok(out)
     }
@@ -247,6 +244,8 @@ impl CleanerPort for NativeCleaner {
         let mut removed_count = 0usize;
         let mut removed_bytes = 0u64;
         let mut removed_paths = Vec::new();
+        let mut errors: Vec<String> = Vec::new();
+
         let scan_root = request
             .scan_root
             .canonicalize()
@@ -278,9 +277,13 @@ impl CleanerPort for NativeCleaner {
             if !path.exists() {
                 continue;
             }
-            let canonical = path
-                .canonicalize()
-                .with_context(|| format!("invalid path: {:?}", path))?;
+            let canonical = match path.canonicalize() {
+                Ok(c) => c,
+                Err(e) => {
+                    errors.push(format!("{}: {e}", path.display()));
+                    continue;
+                }
+            };
             if !is_safe_delete_target(&scan_root, &canonical) {
                 continue;
             }
@@ -291,31 +294,42 @@ impl CleanerPort for NativeCleaner {
             // only when the caller did not provide one (e.g. Fast-mode scans).
             let bytes = match size_hint.get(&path).copied() {
                 Some(b) if b > 0 => b,
-                _ => dir_size(&path).unwrap_or(0),
+                _ => dir_size(&path),
             };
-            fs::remove_dir_all(&canonical)
-                .with_context(|| format!("failed to remove {:?}", canonical))?;
-            removed_count += 1;
-            removed_bytes += bytes;
-            removed_paths.push(path.clone());
+            // Best-effort: a locked file inside a directory must not abort the
+            // deletion of the remaining selected paths.
+            match fs::remove_dir_all(&canonical) {
+                Ok(()) => {
+                    removed_count += 1;
+                    removed_bytes += bytes;
+                    removed_paths.push(path.clone());
+                }
+                Err(e) => {
+                    errors.push(format!("{}: {e}", canonical.display()));
+                }
+            }
         }
         Ok(CleanResult {
             removed_count,
             removed_bytes,
             removed_paths,
+            errors,
         })
     }
 }
 
-fn dir_size(path: &Path) -> Result<u64> {
+// Returns 0 for entries whose metadata cannot be read (permission denied, etc.)
+// rather than propagating the error — size calculation is best-effort.
+fn dir_size(path: &Path) -> u64 {
     let mut total = 0u64;
     for entry in WalkDir::new(path).follow_links(false).into_iter().filter_map(Result::ok) {
         if entry.file_type().is_file() {
-            let meta = entry.metadata()?;
-            total = total.saturating_add(meta.len());
+            if let Ok(meta) = entry.metadata() {
+                total = total.saturating_add(meta.len());
+            }
         }
     }
-    Ok(total)
+    total
 }
 
 fn is_safe_delete_target(scan_root: &Path, candidate: &Path) -> bool {
@@ -352,6 +366,7 @@ mod tests {
 
         let result = NativeCleaner.clean(&req(root.clone(), vec![root.clone()])).expect("clean");
         assert_eq!(result.removed_count, 0);
+        assert!(result.errors.is_empty());
         assert!(root.exists());
     }
 
@@ -365,6 +380,7 @@ mod tests {
 
         let result = NativeCleaner.clean(&req(root, vec![outside.clone()])).expect("clean");
         assert_eq!(result.removed_count, 0);
+        assert!(result.errors.is_empty());
         assert!(outside.exists());
     }
 
@@ -378,6 +394,7 @@ mod tests {
 
         let result = NativeCleaner.clean(&req(root, vec![file.clone()])).expect("clean");
         assert_eq!(result.removed_count, 0);
+        assert!(result.errors.is_empty());
         assert!(file.exists(), "file must not be deleted");
     }
 
@@ -393,6 +410,7 @@ mod tests {
 
         let result = NativeCleaner.clean(&req(root, vec![target.clone()])).expect("clean");
         assert_eq!(result.removed_count, 1);
+        assert!(result.errors.is_empty());
         assert!(!target.exists());
         assert_eq!(result.removed_paths, vec![target]);
     }
@@ -410,6 +428,7 @@ mod tests {
             .clean(&req(root, vec![a.clone(), b.clone()]))
             .expect("clean");
         assert_eq!(result.removed_count, 2);
+        assert!(result.errors.is_empty());
         assert!(!a.exists());
         assert!(!b.exists());
         assert_eq!(result.removed_paths.len(), 2);
@@ -421,11 +440,11 @@ mod tests {
         let root = temp.path().join("workspace");
         let ghost = root.join("proj").join("node_modules");
         fs::create_dir_all(&root).expect("create root");
-        // ghost is NOT created — simulates a path deleted between scan and clean
 
         let result = NativeCleaner.clean(&req(root, vec![ghost])).expect("clean");
         assert_eq!(result.removed_count, 0);
         assert_eq!(result.removed_bytes, 0);
+        assert!(result.errors.is_empty());
     }
 
     #[test]
@@ -438,14 +457,13 @@ mod tests {
         assert_eq!(result.removed_count, 0);
         assert_eq!(result.removed_bytes, 0);
         assert!(result.removed_paths.is_empty());
+        assert!(result.errors.is_empty());
     }
 
     // ── ordering: deepest path deleted first ─────────────────────────────────
 
     #[test]
     fn parent_and_nested_child_both_selected_delete_cleanly() {
-        // child is deeper → deleted first; parent is then removed by remove_dir_all
-        // which still succeeds because the parent dir itself still exists.
         let temp = tempdir().expect("tempdir");
         let root = temp.path().join("workspace");
         let parent = root.join("proj").join("node_modules");
@@ -456,6 +474,7 @@ mod tests {
             .clean(&req(root, vec![parent.clone(), child.clone()]))
             .expect("clean");
         assert_eq!(result.removed_count, 2);
+        assert!(result.errors.is_empty());
         assert!(!parent.exists());
     }
 
@@ -463,9 +482,6 @@ mod tests {
 
     #[test]
     fn uses_known_bytes_without_measuring_again() {
-        // If a non-zero hint is provided, removed_bytes must equal the hint —
-        // not the real file size (which is different).  This proves the fast
-        // path is taken and dir_size is NOT called again.
         let temp = tempdir().expect("tempdir");
         let root = temp.path().join("workspace");
         let target = root.join("proj").join("node_modules");
@@ -478,12 +494,12 @@ mod tests {
             .expect("clean");
         assert_eq!(result.removed_count, 1);
         assert_eq!(result.removed_bytes, HINT);
+        assert!(result.errors.is_empty());
         assert!(!target.exists());
     }
 
     #[test]
     fn falls_back_to_dir_size_when_hint_is_zero() {
-        // hint = 0 means "unknown" → must measure the real content
         let temp = tempdir().expect("tempdir");
         let root = temp.path().join("workspace");
         let target = root.join("proj").join("node_modules");
@@ -495,6 +511,7 @@ mod tests {
             .expect("clean");
         assert_eq!(result.removed_count, 1);
         assert_eq!(result.removed_bytes, 512);
+        assert!(result.errors.is_empty());
     }
 
     // ── mixed selection ──────────────────────────────────────────────────────
@@ -512,7 +529,46 @@ mod tests {
             .clean(&req(root, vec![inside.clone(), outside.clone()]))
             .expect("clean");
         assert_eq!(result.removed_count, 1);
+        assert!(result.errors.is_empty());
         assert!(!inside.exists());
         assert!(outside.exists());
+    }
+
+    // ── best-effort: uma falha não aborta as outras deleções ─────────────────
+
+    /// Simula uma pasta que não pode ser deletada (permissões) e verifica que
+    /// as outras pastas da seleção ainda são removidas com sucesso.
+    #[cfg(unix)]
+    #[test]
+    fn best_effort_continues_after_removal_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path().join("workspace");
+
+        // good: será deletada com sucesso
+        let good = root.join("proj-a").join("node_modules");
+        // bad: tem um subdiretório sem permissão → remove_dir_all falha
+        let bad = root.join("proj-b").join("node_modules");
+        let bad_inner = bad.join("locked");
+
+        fs::create_dir_all(&good).expect("create good");
+        fs::create_dir_all(&bad_inner).expect("create bad inner");
+
+        // Sem rx/wx no subdiretório: remove_dir_all não consegue listar seus filhos
+        fs::set_permissions(&bad_inner, fs::Permissions::from_mode(0o000))
+            .expect("chmod 000");
+
+        let result = NativeCleaner
+            .clean(&req(root, vec![good.clone(), bad.clone()]))
+            .expect("clean call itself must succeed");
+
+        // Restaura permissões antes de qualquer assert (garante limpeza do tempdir)
+        fs::set_permissions(&bad_inner, fs::Permissions::from_mode(0o755)).ok();
+
+        assert_eq!(result.removed_count, 1, "good deve ser removida");
+        assert!(!good.exists(), "good não deve existir mais");
+        assert!(bad.exists(), "bad ainda existe pois falhou");
+        assert_eq!(result.errors.len(), 1, "deve haver exatamente 1 erro registrado");
     }
 }

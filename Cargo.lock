@@ -2509,6 +2509,7 @@ dependencies = [
  "domain",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

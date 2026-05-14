@@ -47,6 +47,10 @@ pub struct CleanResult {
     pub removed_count: usize,
     pub removed_bytes: u64,
     pub removed_paths: Vec<PathBuf>,
+    /// Paths that could not be deleted and the reason. Non-empty means the
+    /// cleaner ran in best-effort mode and some directories survived.
+    #[serde(default)]
+    pub errors: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

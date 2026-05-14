@@ -390,15 +390,23 @@ impl DesktopCleanerUi {
             match rx.try_recv() {
                 Ok(result) => match result {
                     Ok(done) => {
+                        let removed_count = done.removed_count;
+                        let removed_bytes = done.removed_bytes;
+                        let error_count = done.errors.len();
                         let removed_set: HashSet<PathBuf> =
                             done.removed_paths.into_iter().collect();
                         self.rows.retain(|r| !removed_set.contains(&r.path));
                         self.total_bytes = self.rows.iter().map(|r| r.bytes).sum();
                         self.apply_sort_and_filter();
+                        let err_note = if error_count == 0 {
+                            String::new()
+                        } else {
+                            format!("  ⚠ {error_count} falha(s) — verifique permissões")
+                        };
                         self.status = format!(
-                            "Removidos {} itens ({})",
-                            done.removed_count,
-                            format_bytes(done.removed_bytes)
+                            "Removidos {removed_count} itens ({}){}",
+                            format_bytes(removed_bytes),
+                            err_note
                         );
                         self.is_cleaning = false;
                     }
