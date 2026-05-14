@@ -20,8 +20,6 @@ serde_json = "1.0"
 thiserror = "2.0"
 walkdir = "2.5"
 dirs = "6.0"
-slint = "1.14"
-tokio = { version = "1.48", features = ["rt-multi-thread", "sync"] }
 tempfile = "3.23"
 eframe = "0.33"
 rfd = "0.15"

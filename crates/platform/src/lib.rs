@@ -1,3 +1,3 @@
 mod fs_backend;
 
-pub use fs_backend::NativeFsBackend;
+pub use fs_backend::{NativeCleaner, NativeScanner};

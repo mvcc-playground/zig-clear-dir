@@ -1,4 +1,4 @@
-use crate::{CleanerPort, LearningStorePort, ScannerPort};
+use crate::{CleanerPort, LearningStorePort, ScanProgressPort, ScannerPort};
 use anyhow::Result;
 use domain::{
     AppLearningState, CleanRequest, CleanResult, GarbageRules, ScanMode, ScanRequest, ScanResult,
@@ -30,11 +30,16 @@ impl CleanerApp {
         self.learning_store.load()
     }
 
-    pub fn scan(&self, root: PathBuf) -> Result<ScanResult> {
-        self.scan_with_mode(root, ScanMode::Full)
+    pub fn scan_with_mode(&self, root: PathBuf, mode: ScanMode) -> Result<ScanResult> {
+        self.scan_with_mode_and_progress(root, mode, None)
     }
 
-    pub fn scan_with_mode(&self, root: PathBuf, mode: ScanMode) -> Result<ScanResult> {
+    pub fn scan_with_mode_and_progress(
+        &self,
+        root: PathBuf,
+        mode: ScanMode,
+        progress: Option<&dyn ScanProgressPort>,
+    ) -> Result<ScanResult> {
         let mut learning = self.learning_store.load()?;
         if !learning.recent_roots.iter().any(|v| v == &root) {
             learning.recent_roots.insert(0, root.clone());
@@ -43,7 +48,7 @@ impl CleanerApp {
         }
 
         let request = ScanRequest { root, mode };
-        let mut candidates = self.scanner.scan(&request, &learning)?;
+        let mut candidates = self.scanner.scan(&request, &learning, progress)?;
         candidates.sort_by(|a, b| b.bytes.cmp(&a.bytes));
         let total_bytes = candidates.iter().map(|v| v.bytes).sum();
         Ok(ScanResult {
@@ -104,7 +109,12 @@ mod tests {
 
     struct MockScanner;
     impl ScannerPort for MockScanner {
-        fn scan(&self, _request: &ScanRequest, _learning: &AppLearningState) -> Result<Vec<CandidateEntry>> {
+        fn scan(
+            &self,
+            _request: &ScanRequest,
+            _learning: &AppLearningState,
+            _progress: Option<&dyn ScanProgressPort>,
+        ) -> Result<Vec<CandidateEntry>> {
             Ok(Vec::new())
         }
     }
@@ -171,7 +181,7 @@ mod tests {
             recent_roots: Vec::new(),
             stats: LearningStats::default(),
         });
-        let _ = app.scan(PathBuf::from("C:\\tmp"));
+        let _ = app.scan_with_mode(PathBuf::from("C:\\tmp"), ScanMode::Full);
         let learning = app.load_learning().expect("load");
         assert!(!learning.recent_roots.is_empty());
     }

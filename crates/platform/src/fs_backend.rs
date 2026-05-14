@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use application::{CleanerPort, ScannerPort};
+use application::{CleanerPort, ScanProgressPort, ScanProgressSnapshot, ScannerPort};
 use domain::{
     AppLearningState, CandidateEntry, CleanRequest, CleanResult, GarbageRules, ScanMode,
     ScanRequest,
@@ -9,11 +9,17 @@ use std::fs;
 use std::path::Path;
 use walkdir::WalkDir;
 
-pub struct NativeFsBackend;
+pub struct NativeScanner;
+pub struct NativeCleaner;
 
-impl ScannerPort for NativeFsBackend {
-    fn scan(&self, request: &ScanRequest, learning: &AppLearningState) -> Result<Vec<CandidateEntry>> {
-        let pending = discover_candidates(request, learning)?;
+impl ScannerPort for NativeScanner {
+    fn scan(
+        &self,
+        request: &ScanRequest,
+        learning: &AppLearningState,
+        progress: Option<&dyn ScanProgressPort>,
+    ) -> Result<Vec<CandidateEntry>> {
+        let pending = discover_candidates(request, learning, progress)?;
         if request.mode == ScanMode::Fast {
             return Ok(pending
                 .into_iter()
@@ -48,40 +54,70 @@ struct PendingCandidate {
     kind: String,
 }
 
-fn discover_candidates(request: &ScanRequest, learning: &AppLearningState) -> Result<Vec<PendingCandidate>> {
+fn discover_candidates(
+    request: &ScanRequest,
+    learning: &AppLearningState,
+    progress: Option<&dyn ScanProgressPort>,
+) -> Result<Vec<PendingCandidate>> {
     #[cfg(windows)]
     {
-        discover_windows_native(request, learning)
+        discover_windows_native(request, learning, progress)
     }
     #[cfg(not(windows))]
     {
-        discover_walkdir(request, learning)
+        discover_walkdir(request, learning, progress)
     }
 }
 
-#[cfg_attr(windows, allow(dead_code))]
-fn discover_walkdir(request: &ScanRequest, learning: &AppLearningState) -> Result<Vec<PendingCandidate>> {
+#[cfg(not(windows))]
+fn discover_walkdir(
+    request: &ScanRequest,
+    learning: &AppLearningState,
+    progress: Option<&dyn ScanProgressPort>,
+) -> Result<Vec<PendingCandidate>> {
     let rules = GarbageRules::new(&learning.base_targets, &learning.custom_targets);
     let mut out = Vec::new();
+    let mut visited_dirs = 0usize;
+    let mut matched_dirs = 0usize;
     for entry in WalkDir::new(&request.root)
         .follow_links(false)
         .into_iter()
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_dir())
     {
+        visited_dirs += 1;
         let path = entry.path();
         if let Some(kind) = rules.matches_dir_name(path) {
+            matched_dirs += 1;
             out.push(PendingCandidate {
                 path: path.to_path_buf(),
                 kind,
             });
         }
+        if visited_dirs % 256 == 0 {
+            if let Some(progress) = progress {
+                progress.on_progress(ScanProgressSnapshot {
+                    visited_dirs,
+                    matched_dirs,
+                });
+            }
+        }
+    }
+    if let Some(progress) = progress {
+        progress.on_progress(ScanProgressSnapshot {
+            visited_dirs,
+            matched_dirs,
+        });
     }
     Ok(out)
 }
 
 #[cfg(windows)]
-fn discover_windows_native(request: &ScanRequest, learning: &AppLearningState) -> Result<Vec<PendingCandidate>> {
+fn discover_windows_native(
+    request: &ScanRequest,
+    learning: &AppLearningState,
+    progress: Option<&dyn ScanProgressPort>,
+) -> Result<Vec<PendingCandidate>> {
     use std::ffi::OsString;
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
@@ -90,10 +126,6 @@ fn discover_windows_native(request: &ScanRequest, learning: &AppLearningState) -
         FindClose, FindExInfoBasic, FindExSearchNameMatch, FindFirstFileExW, FindNextFileW,
         WIN32_FIND_DATAW,
     };
-
-    fn wide_null(s: &std::path::Path) -> Vec<u16> {
-        s.as_os_str().encode_wide().chain(Some(0)).collect()
-    }
 
     fn join_pattern(path: &std::path::Path) -> Vec<u16> {
         let mut s = path.as_os_str().encode_wide().collect::<Vec<_>>();
@@ -113,8 +145,11 @@ fn discover_windows_native(request: &ScanRequest, learning: &AppLearningState) -
     let rules = GarbageRules::new(&learning.base_targets, &learning.custom_targets);
     let mut out = Vec::new();
     let mut stack = vec![request.root.clone()];
+    let mut visited_dirs = 0usize;
+    let mut matched_dirs = 0usize;
 
     while let Some(current) = stack.pop() {
+        visited_dirs += 1;
         let pattern = join_pattern(&current);
         let mut data = WIN32_FIND_DATAW::default();
         let handle: HANDLE = unsafe {
@@ -141,6 +176,7 @@ fn discover_windows_native(request: &ScanRequest, learning: &AppLearningState) -
                     let mut child = current.clone();
                     child.push(&name);
                     if let Some(kind) = rules.matches_dir_name(&child) {
+                        matched_dirs += 1;
                         out.push(PendingCandidate {
                             path: child,
                             kind,
@@ -155,17 +191,29 @@ fn discover_windows_native(request: &ScanRequest, learning: &AppLearningState) -
                 break;
             }
         }
+        if visited_dirs % 256 == 0 {
+            if let Some(progress) = progress {
+                progress.on_progress(ScanProgressSnapshot {
+                    visited_dirs,
+                    matched_dirs,
+                });
+            }
+        }
         unsafe {
             FindClose(handle);
         }
     }
+    if let Some(progress) = progress {
+        progress.on_progress(ScanProgressSnapshot {
+            visited_dirs,
+            matched_dirs,
+        });
+    }
 
-    // keep helper referenced for future optimizations
-    let _ = wide_null(std::path::Path::new("."));
     Ok(out)
 }
 
-impl CleanerPort for NativeFsBackend {
+impl CleanerPort for NativeCleaner {
     fn clean(&self, request: &CleanRequest) -> Result<CleanResult> {
         let mut removed_count = 0usize;
         let mut removed_bytes = 0u64;
@@ -212,15 +260,11 @@ fn dir_size(path: &Path) -> Result<u64> {
     Ok(total)
 }
 
-#[allow(dead_code)]
 fn is_safe_delete_target(scan_root: &Path, candidate: &Path) -> bool {
     if candidate == scan_root {
         return false;
     }
     if !candidate.starts_with(scan_root) {
-        return false;
-    }
-    if candidate.parent().is_none() {
         return false;
     }
     true
@@ -237,7 +281,7 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         let root = temp.path().join("workspace");
         fs::create_dir_all(&root).expect("create root");
-        let backend = NativeFsBackend;
+        let backend = NativeCleaner;
         let request = CleanRequest {
             scan_root: root.clone(),
             selected_paths: vec![root.clone()],
@@ -255,7 +299,7 @@ mod tests {
         let outside = temp.path().join("outside").join("node_modules");
         fs::create_dir_all(&root).expect("create root");
         fs::create_dir_all(&outside).expect("create outside");
-        let backend = NativeFsBackend;
+        let backend = NativeCleaner;
         let request = CleanRequest {
             scan_root: root.clone(),
             selected_paths: vec![outside.clone()],
@@ -273,7 +317,7 @@ mod tests {
         let target = root.join("project").join("node_modules");
         fs::create_dir_all(&target).expect("create target");
         fs::write(target.join("a.txt"), b"hello").expect("seed file");
-        let backend = NativeFsBackend;
+        let backend = NativeCleaner;
         let request = CleanRequest {
             scan_root: root.clone(),
             selected_paths: vec![target.clone()],

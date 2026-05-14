@@ -1,6 +1,6 @@
 use application::ScannerPort;
 use domain::{AppLearningState, ScanMode, ScanRequest};
-use platform::NativeFsBackend;
+use platform::NativeScanner;
 use std::env;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -18,7 +18,7 @@ fn main() {
         ScanMode::Full
     };
 
-    let backend = NativeFsBackend;
+    let backend = NativeScanner;
     let learning = AppLearningState::default();
     let req = ScanRequest {
         root: PathBuf::from(root),
@@ -36,7 +36,7 @@ fn main() {
 
     for i in 0..iterations {
         let start = Instant::now();
-        let result = backend.scan(&req, &learning).expect("scan failed");
+        let result = backend.scan(&req, &learning, None).expect("scan failed");
         let elapsed = start.elapsed().as_millis();
         let total_bytes: u64 = result.iter().map(|v| v.bytes).sum();
         best_ms = best_ms.min(elapsed);
