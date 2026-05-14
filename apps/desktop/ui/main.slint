@@ -1,0 +1,135 @@
+import { Button, LineEdit, CheckBox, VerticalBox, HorizontalBox, ScrollView } from "std-widgets.slint";
+
+export struct Candidate {
+    selected: bool,
+    path: string,
+    kind: string,
+    size_label: string,
+}
+
+export component MainWindow inherits Window {
+    title: "Clear Dev Cache";
+    width: 1100px;
+    height: 760px;
+    background: #eef2f5;
+
+    in-out property <string> root_path: "";
+    in-out property <string> status_text: "Ready";
+    in-out property <string> total_text: "0 B";
+    in-out property <string> custom_target: "";
+    in-out property <string> base_targets_csv: "";
+    in-out property <[Candidate]> candidates: [];
+    in-out property <string> available_targets: "";
+
+    callback scan();
+    callback clean_selected();
+    callback add_target(string);
+    callback save_base_targets(string);
+    callback toggle_row(int, bool);
+
+    VerticalBox {
+        padding: 18px;
+        spacing: 12px;
+
+        Rectangle {
+            border-radius: 12px;
+            background: #ffffff;
+            min-height: 96px;
+            VerticalBox {
+                padding: 12px;
+                spacing: 8px;
+                Text {
+                    text: "Desktop Cleaner";
+                    font-size: 24px;
+                    color: #1d2730;
+                    font-weight: 700;
+                }
+                Text {
+                    text: "Aprende com seu uso para acelerar limpezas futuras.";
+                    color: #3f5565;
+                    font-size: 14px;
+                }
+            }
+        }
+
+        Rectangle {
+            border-radius: 12px;
+            background: #ffffff;
+            VerticalBox {
+                padding: 12px;
+                spacing: 10px;
+                HorizontalBox {
+                    spacing: 8px;
+                    LineEdit {
+                        text <=> root_path;
+                        placeholder-text: "Pasta raiz do scan";
+                    }
+                    Button {
+                        text: "Scan";
+                        clicked => { root.scan(); }
+                    }
+                    Button {
+                        text: "Limpar Selecionados";
+                        clicked => { root.clean_selected(); }
+                    }
+                }
+                HorizontalBox {
+                    spacing: 8px;
+                    LineEdit {
+                        text <=> base_targets_csv;
+                        placeholder-text: "Alvos padrao CSV (ex: node_modules,target,dist)";
+                    }
+                    Button {
+                        text: "Salvar Alvos Padrao";
+                        clicked => { root.save_base_targets(root.base_targets_csv); }
+                    }
+                }
+                HorizontalBox {
+                    spacing: 8px;
+                    LineEdit {
+                        text <=> custom_target;
+                        placeholder-text: "Novo alvo (ex: .angular/cache)";
+                    }
+                    Button {
+                        text: "Adicionar Regra";
+                        clicked => { root.add_target(root.custom_target); }
+                    }
+                }
+                Text { text: "Alvos ativos: " + root.available_targets; color: #455f70; }
+                Text { text: "Status: " + root.status_text + " | Total: " + root.total_text; color: #1d2730; font-weight: 600; }
+            }
+        }
+
+        Rectangle {
+            border-radius: 12px;
+            background: #ffffff;
+            VerticalBox {
+                padding: 12px;
+                spacing: 8px;
+                Text { text: "Resultados"; font-size: 20px; font-weight: 700; color: #1d2730; }
+                ScrollView {
+                    height: 470px;
+                    VerticalBox {
+                        spacing: 6px;
+                        for item[index] in root.candidates : Rectangle {
+                            border-radius: 8px;
+                            background: #f7f9fb;
+                            min-height: 44px;
+                            HorizontalBox {
+                                padding: 8px;
+                                spacing: 8px;
+                                CheckBox {
+                                    checked: item.selected;
+                                    toggled => { root.toggle_row(index, self.checked); }
+                                }
+                                Text { text: item.kind; color: #2f6f9f; width: 140px; }
+                                Text { text: item.path; color: #2f3d47; horizontal-stretch: 1; }
+                                Text { text: item.size_label; color: #113a54; width: 130px; horizontal-alignment: right; }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

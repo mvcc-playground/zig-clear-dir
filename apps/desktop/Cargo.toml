@@ -1,0 +1,15 @@
+[package]
+name = "clear-dev-cache-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+default-run = "clear-dev-cache-desktop"
+
+[dependencies]
+anyhow.workspace = true
+application = { path = "../../crates/application" }
+domain = { path = "../../crates/domain" }
+platform = { path = "../../crates/platform" }
+preferences = { path = "../../crates/preferences" }
+eframe.workspace = true
+rfd.workspace = true

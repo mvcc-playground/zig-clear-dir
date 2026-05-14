@@ -3,3 +3,4 @@ zig-out/
 .rm-folders/
 .zig-global-cache/
 scan.json
+target/

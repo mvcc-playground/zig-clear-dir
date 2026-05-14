@@ -1,0 +1,68 @@
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanRequest {
+    pub root: PathBuf,
+    pub mode: ScanMode,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ScanMode {
+    Fast,
+    Full,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CandidateEntry {
+    pub path: PathBuf,
+    pub bytes: u64,
+    pub kind: String,
+    pub selected: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanResult {
+    pub candidates: Vec<CandidateEntry>,
+    pub total_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CleanRequest {
+    pub scan_root: PathBuf,
+    pub selected_paths: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CleanResult {
+    pub removed_count: usize,
+    pub removed_bytes: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LearningStats {
+    pub runs: u64,
+    pub total_removed_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppLearningState {
+    pub favorites: Vec<PathBuf>,
+    pub base_targets: Vec<String>,
+    pub custom_targets: Vec<String>,
+    pub recent_roots: Vec<PathBuf>,
+    pub stats: LearningStats,
+}
+
+impl Default for AppLearningState {
+    fn default() -> Self {
+        Self {
+            favorites: Vec::new(),
+            base_targets: Vec::new(),
+            custom_targets: Vec::new(),
+            recent_roots: Vec::new(),
+            stats: LearningStats::default(),
+        }
+    }
+}
