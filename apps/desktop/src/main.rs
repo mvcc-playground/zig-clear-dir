@@ -1,7 +1,7 @@
 use anyhow::Result;
 use application::{CleanerApp, ScanProgressPort, ScanProgressSnapshot};
 use domain::{CleanRequest, CleanResult, ScanMode, ScanResult, default_targets_vec};
-use eframe::egui::{self, Color32, RichText};
+use eframe::egui::{self, Align, Color32, Layout, RichText};
 use platform::{NativeCleaner, NativeScanner, system_excluded_roots};
 use preferences::JsonLearningStore;
 use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
@@ -18,7 +18,11 @@ fn main() -> Result<()> {
     let learning = Arc::new(JsonLearningStore::new());
     let app = Arc::new(CleanerApp::new(scanner, cleaner, learning));
 
-    let native_options = eframe::NativeOptions::default();
+    let mut native_options = eframe::NativeOptions::default();
+    native_options.viewport = egui::ViewportBuilder::default()
+        .with_inner_size([820.0, 600.0])
+        .with_min_inner_size([640.0, 480.0]);
+
     eframe::run_native(
         "Clear Dev Cache",
         native_options,
@@ -29,6 +33,8 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+// ─── Domain types ────────────────────────────────────────────────────────────
+
 #[derive(Clone)]
 struct RowState {
     path: PathBuf,
@@ -38,34 +44,55 @@ struct RowState {
     selected: bool,
 }
 
+#[derive(Clone)]
+struct TargetEntry {
+    name: String,
+    is_custom: bool,
+}
+
+#[derive(PartialEq, Clone, Copy, Default)]
+enum SortColumn {
+    Kind,
+    Path,
+    #[default]
+    Size,
+}
+
 enum Step {
     Configure,
     Scanning,
     Review,
 }
 
-struct DesktopCleanerUi {
-    app: Arc<CleanerApp>,
-    step: Step,
-    status: String,
-    root_path: String,
-    base_targets_csv: String,
-    custom_target_input: String,
-    available_targets: String,
-    total_bytes: u64,
-    rows: Vec<RowState>,
-    scan_rx: Option<Receiver<Result<ScanResult, String>>>,
-    scan_progress_rx: Option<Receiver<ScanProgressSnapshot>>,
-    clean_rx: Option<Receiver<Result<CleanResult, String>>>,
-    scan_started_at: Option<Instant>,
-    scan_min_visible_until: Option<Instant>,
-    is_cleaning: bool,
-    selected_mode: ScanMode,
-    active_scan_mode: ScanMode,
-    scan_last_mode: Option<ScanMode>,
-    progress_snapshot: Option<ScanProgressSnapshot>,
-    scan_pause_flag: Arc<AtomicBool>,
+// ─── Speed tracker ───────────────────────────────────────────────────────────
+
+struct SpeedTracker {
+    last_visited: usize,
+    last_time: Instant,
+    speed_dirs_per_sec: f32,
 }
+
+impl SpeedTracker {
+    fn new() -> Self {
+        Self { last_visited: 0, last_time: Instant::now(), speed_dirs_per_sec: 0.0 }
+    }
+
+    fn update(&mut self, visited: usize) {
+        let elapsed = self.last_time.elapsed().as_secs_f32();
+        if elapsed >= 0.25 {
+            let delta = visited.saturating_sub(self.last_visited);
+            self.speed_dirs_per_sec = delta as f32 / elapsed;
+            self.last_visited = visited;
+            self.last_time = Instant::now();
+        }
+    }
+
+    fn reset(&mut self) {
+        *self = SpeedTracker::new();
+    }
+}
+
+// ─── Progress channel ────────────────────────────────────────────────────────
 
 struct ChannelProgress {
     tx: mpsc::Sender<ScanProgressSnapshot>,
@@ -82,65 +109,120 @@ impl ScanProgressPort for ChannelProgress {
     }
 }
 
+// ─── UI state ────────────────────────────────────────────────────────────────
+
+struct DesktopCleanerUi {
+    app: Arc<CleanerApp>,
+    step: Step,
+    status: String,
+
+    // Aba Configurar
+    root_path: String,
+    targets_list: Vec<TargetEntry>,
+    new_target_input: String,
+    selected_mode: ScanMode,
+
+    // Scan channels & state
+    scan_rx: Option<Receiver<Result<ScanResult, String>>>,
+    scan_progress_rx: Option<Receiver<ScanProgressSnapshot>>,
+    clean_rx: Option<Receiver<Result<CleanResult, String>>>,
+    scan_started_at: Option<Instant>,
+    scan_min_visible_until: Option<Instant>,
+    scan_pause_flag: Arc<AtomicBool>,
+    active_scan_mode: ScanMode,
+    progress_snapshot: Option<ScanProgressSnapshot>,
+    speed_tracker: SpeedTracker,
+    is_cleaning: bool,
+
+    // Resultados
+    rows: Vec<RowState>,
+    total_bytes: u64,
+
+    // Filtro e ordenação
+    sort_column: SortColumn,
+    sort_asc: bool,
+    search_query: String,
+    filtered_indices: Vec<usize>,
+}
+
 impl DesktopCleanerUi {
     fn new(app: Arc<CleanerApp>) -> Self {
-        let (base_targets_csv, available_targets, initial_status) = match app.load_learning() {
+        let (targets_list, initial_status) = match app.load_learning() {
             Ok(learning) => {
-                let base = if learning.base_targets.is_empty() {
-                    default_targets_vec()
-                } else {
-                    learning.base_targets.clone()
-                };
-                let rules = domain::GarbageRules::new(&learning.base_targets, &learning.custom_targets);
-                (
-                    base.join(","),
-                    rules.all_targets().join(", "),
-                    "Defina as pastas e clique em Iniciar scan".to_string(),
-                )
+                let list = build_targets_list(&learning);
+                (list, "Defina a pasta raiz e clique em Iniciar Scan".to_string())
             }
             Err(e) => {
                 eprintln!("Aviso: falha ao carregar estado ({e}), usando padrões");
-                let base = default_targets_vec();
-                (
-                    base.join(","),
-                    base.join(", "),
-                    "Estado local inválido, usando configuração padrão".to_string(),
-                )
+                let defaults: Vec<TargetEntry> = default_targets_vec()
+                    .into_iter()
+                    .map(|name| TargetEntry { name, is_custom: false })
+                    .collect();
+                (defaults, "Estado local inválido, usando configuração padrão".to_string())
             }
         };
+
         Self {
             app,
             step: Step::Configure,
             status: initial_status,
             root_path: String::new(),
-            base_targets_csv,
-            custom_target_input: String::new(),
-            available_targets,
-            total_bytes: 0,
-            rows: Vec::new(),
+            targets_list,
+            new_target_input: String::new(),
+            selected_mode: ScanMode::Fast,
             scan_rx: None,
             scan_progress_rx: None,
             clean_rx: None,
             scan_started_at: None,
             scan_min_visible_until: None,
-            is_cleaning: false,
-            selected_mode: ScanMode::Fast,
-            active_scan_mode: ScanMode::Fast,
-            scan_last_mode: None,
-            progress_snapshot: None,
             scan_pause_flag: Arc::new(AtomicBool::new(false)),
+            active_scan_mode: ScanMode::Fast,
+            progress_snapshot: Some(ScanProgressSnapshot { visited_dirs: 0, matched_dirs: 0 }),
+            speed_tracker: SpeedTracker::new(),
+            is_cleaning: false,
+            rows: Vec::new(),
+            total_bytes: 0,
+            sort_column: SortColumn::Size,
+            sort_asc: false,
+            search_query: String::new(),
+            filtered_indices: Vec::new(),
         }
     }
 
-    fn start_scan(&mut self) {
-        match self.app.set_base_targets_csv(self.base_targets_csv.clone()) {
-            Ok(targets) => self.available_targets = targets.join(", "),
-            Err(err) => {
-                self.status = format!("Erro ao salvar alvos padrão: {err}");
-                return;
+    fn rebuild_targets_list(&mut self) {
+        match self.app.load_learning() {
+            Ok(learning) => {
+                self.targets_list = build_targets_list(&learning);
+            }
+            Err(e) => {
+                self.status = format!("Erro ao carregar targets: {e}");
             }
         }
+    }
 
+    fn apply_sort_and_filter(&mut self) {
+        self.rows.sort_by(|a, b| {
+            let ord = match self.sort_column {
+                SortColumn::Kind => a.kind.cmp(&b.kind),
+                SortColumn::Path => a.path.cmp(&b.path),
+                SortColumn::Size => a.bytes.cmp(&b.bytes),
+            };
+            if self.sort_asc { ord } else { ord.reverse() }
+        });
+        let q = self.search_query.trim().to_ascii_lowercase();
+        self.filtered_indices = self.rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| {
+                q.is_empty()
+                    || r.path.to_string_lossy().to_ascii_lowercase().contains(&q)
+                    || r.kind.to_ascii_lowercase().contains(&q)
+            })
+            .map(|(i, _)| i)
+            .collect();
+    }
+
+    fn start_scan(&mut self) {
         let root = self.root_path.trim().to_string();
         if root.is_empty() {
             self.status = "Informe a pasta raiz".to_string();
@@ -158,14 +240,12 @@ impl DesktopCleanerUi {
         self.scan_started_at = Some(now);
         self.scan_min_visible_until = Some(now + Duration::from_millis(800));
         self.active_scan_mode = self.selected_mode;
-        self.scan_last_mode = Some(self.selected_mode);
         self.rows.clear();
         self.total_bytes = 0;
-        self.progress_snapshot = Some(ScanProgressSnapshot {
-            visited_dirs: 0,
-            matched_dirs: 0,
-        });
+        self.filtered_indices.clear();
+        self.progress_snapshot = Some(ScanProgressSnapshot { visited_dirs: 0, matched_dirs: 0 });
         self.scan_pause_flag.store(false, Ordering::Relaxed);
+        self.speed_tracker.reset();
 
         let app = self.app.clone();
         let (tx, rx) = mpsc::channel();
@@ -176,10 +256,7 @@ impl DesktopCleanerUi {
         let pause_flag = self.scan_pause_flag.clone();
         let excluded = system_excluded_roots();
         std::thread::spawn(move || {
-            let reporter = ChannelProgress {
-                tx: progress_tx,
-                paused: pause_flag,
-            };
+            let reporter = ChannelProgress { tx: progress_tx, paused: pause_flag };
             let result = app
                 .scan_with_mode_and_progress(root_path, mode, Some(&reporter), excluded)
                 .map_err(|e| e.to_string());
@@ -209,26 +286,24 @@ impl DesktopCleanerUi {
         let (tx, rx) = mpsc::channel();
         self.clean_rx = Some(rx);
         std::thread::spawn(move || {
-            let req = CleanRequest {
-                scan_root: PathBuf::from(root),
-                selected_paths,
-            };
+            let req = CleanRequest { scan_root: PathBuf::from(root), selected_paths };
             let result = app.clean(req).map_err(|e| e.to_string());
             let _ = tx.send(result);
         });
     }
 
     fn poll_background(&mut self, ctx: &egui::Context) {
+        // Poll scan progress
         if let Some(progress_rx) = self.scan_progress_rx.take() {
             let mut keep = true;
             loop {
                 match progress_rx.try_recv() {
-                    Ok(snapshot) => self.progress_snapshot = Some(snapshot),
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => {
-                        keep = false;
-                        break;
+                    Ok(snapshot) => {
+                        self.speed_tracker.update(snapshot.visited_dirs);
+                        self.progress_snapshot = Some(snapshot);
                     }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => { keep = false; break; }
                 }
             }
             if keep && matches!(self.step, Step::Scanning) {
@@ -236,6 +311,7 @@ impl DesktopCleanerUi {
             }
         }
 
+        // Poll scan result
         if let Some(rx) = self.scan_rx.take() {
             if let Some(until) = self.scan_min_visible_until {
                 if Instant::now() < until {
@@ -248,17 +324,14 @@ impl DesktopCleanerUi {
                 Ok(result) => match result {
                     Ok(scan) => {
                         self.total_bytes = scan.total_bytes;
-                        self.rows = scan
-                            .candidates
-                            .into_iter()
-                            .map(|c| RowState {
-                                path: c.path,
-                                kind: c.kind,
-                                bytes: c.bytes,
-                                has_exact_size: self.active_scan_mode == ScanMode::Full,
-                                selected: c.selected,
-                            })
-                            .collect();
+                        self.rows = scan.candidates.into_iter().map(|c| RowState {
+                            path: c.path,
+                            kind: c.kind,
+                            bytes: c.bytes,
+                            has_exact_size: self.active_scan_mode == ScanMode::Full,
+                            selected: c.selected,
+                        }).collect();
+                        self.apply_sort_and_filter();
                         self.status = format!("Scan concluído: {} itens", self.rows.len());
                         self.step = Step::Review;
                         self.scan_min_visible_until = None;
@@ -285,19 +358,21 @@ impl DesktopCleanerUi {
             }
         }
 
+        // Poll clean result
         if let Some(rx) = self.clean_rx.take() {
             match rx.try_recv() {
                 Ok(result) => match result {
                     Ok(done) => {
-                        let removed_set: HashSet<PathBuf> = done.removed_paths.into_iter().collect();
+                        let removed_set: HashSet<PathBuf> =
+                            done.removed_paths.into_iter().collect();
                         self.rows.retain(|r| !removed_set.contains(&r.path));
                         self.total_bytes = self.rows.iter().map(|r| r.bytes).sum();
+                        self.apply_sort_and_filter();
                         self.status = format!(
                             "Removidos {} itens ({})",
                             done.removed_count,
                             format_bytes(done.removed_bytes)
                         );
-                        self.step = Step::Review;
                         self.is_cleaning = false;
                     }
                     Err(err) => {
@@ -315,225 +390,478 @@ impl DesktopCleanerUi {
                 }
             }
         }
+
+        if matches!(self.step, Step::Scanning) || self.is_cleaning {
+            ctx.request_repaint_after(Duration::from_millis(60));
+        }
+    }
+
+    // ─── Tab contents ─────────────────────────────────────────────────────
+
+    fn show_configure(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(8.0);
+
+        // Root path selector
+        ui.group(|ui| {
+            ui.label(RichText::new("Pasta raiz").strong());
+            ui.horizontal(|ui| {
+                ui.label("Caminho:");
+                ui.text_edit_singleline(&mut self.root_path);
+                if ui.button("📂 Selecionar").clicked() {
+                    if let Some(path) = FileDialog::new().pick_folder() {
+                        self.root_path = path.display().to_string();
+                        self.status = "Pasta raiz selecionada".to_string();
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Modo de scan:");
+                ui.selectable_value(&mut self.selected_mode, ScanMode::Fast, "Fast")
+                    .on_hover_text("Rápido: encontra as pastas sem calcular tamanhos");
+                ui.selectable_value(&mut self.selected_mode, ScanMode::Full, "Full")
+                    .on_hover_text("Completo: calcula o tamanho real de cada pasta (mais lento)");
+            });
+        });
+
+        ui.add_space(8.0);
+
+        // Targets list
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Pastas-alvo").strong());
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.button("Restaurar padrões").clicked() {
+                        match self.app.set_base_targets_csv(String::new()) {
+                            Ok(_) => {
+                                self.rebuild_targets_list();
+                                self.status = "Padrões restaurados".to_string();
+                            }
+                            Err(e) => self.status = format!("Erro: {e}"),
+                        }
+                    }
+                });
+            });
+
+            // Add new target row
+            ui.horizontal(|ui| {
+                let resp = ui.text_edit_singleline(&mut self.new_target_input);
+                let add_pressed = resp.lost_focus()
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let can_add = !self.new_target_input.trim().is_empty();
+                if (ui.add_enabled(can_add, egui::Button::new("+ Adicionar")).clicked()
+                    || add_pressed)
+                    && can_add
+                {
+                    let name = self.new_target_input.trim().to_string();
+                    match self.app.add_custom_target(name.clone()) {
+                        Ok(_) => {
+                            self.new_target_input.clear();
+                            self.rebuild_targets_list();
+                            self.status = format!("'{name}' adicionado");
+                        }
+                        Err(e) => self.status = format!("Erro: {e}"),
+                    }
+                }
+            });
+
+            ui.separator();
+
+            // Target entries
+            let mut to_remove: Option<String> = None;
+            egui::ScrollArea::vertical().max_height(160.0).id_salt("targets_scroll").show(ui, |ui| {
+                for entry in &self.targets_list {
+                    ui.horizontal(|ui| {
+                        let label = if entry.is_custom {
+                            RichText::new(&entry.name).color(Color32::from_rgb(40, 150, 80))
+                        } else {
+                            RichText::new(&entry.name)
+                        };
+                        ui.label(label);
+                        if entry.is_custom {
+                            ui.label(
+                                RichText::new("custom")
+                                    .small()
+                                    .color(Color32::from_rgb(40, 150, 80)),
+                            );
+                        }
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.small_button("✕").on_hover_text("Remover").clicked() {
+                                to_remove = Some(entry.name.clone());
+                            }
+                        });
+                    });
+                }
+            });
+            if let Some(name) = to_remove {
+                match self.app.remove_target(&name) {
+                    Ok(_) => {
+                        self.rebuild_targets_list();
+                        self.status = format!("'{name}' removido");
+                    }
+                    Err(e) => self.status = format!("Erro: {e}"),
+                }
+            }
+        });
+
+        ui.add_space(12.0);
+
+        let scanning = matches!(self.step, Step::Scanning);
+        let can_scan = !scanning && !self.is_cleaning && !self.root_path.trim().is_empty();
+        if ui
+            .add_enabled(
+                can_scan,
+                egui::Button::new(RichText::new("🔍 Iniciar Scan").size(15.0))
+                    .min_size(egui::vec2(140.0, 32.0)),
+            )
+            .clicked()
+        {
+            self.start_scan();
+        }
+    }
+
+    fn show_scanning(&mut self, ui: &mut egui::Ui) {
+        let paused = self.scan_pause_flag.load(Ordering::Relaxed);
+        let snapshot = self.progress_snapshot.unwrap_or(ScanProgressSnapshot {
+            visited_dirs: 0,
+            matched_dirs: 0,
+        });
+
+        ui.add_space(30.0);
+        ui.vertical_centered(|ui| {
+            if paused {
+                ui.label(
+                    RichText::new("⏸ PAUSADO")
+                        .size(28.0)
+                        .color(Color32::from_rgb(210, 150, 0)),
+                );
+            } else {
+                ui.add(egui::Spinner::new().size(48.0));
+            }
+
+            ui.add_space(16.0);
+
+            if let Some(start) = self.scan_started_at {
+                ui.label(
+                    RichText::new(format!("Tempo: {}s", start.elapsed().as_secs())).size(13.0),
+                );
+            }
+
+            ui.add_space(8.0);
+
+            let stats_text = if paused {
+                format!(
+                    "Visitadas: {}  |  Encontradas: {}  |  pausado",
+                    format_number(snapshot.visited_dirs),
+                    snapshot.matched_dirs
+                )
+            } else {
+                format!(
+                    "Visitadas: {}  |  Encontradas: {}  |  {:.0} dirs/s",
+                    format_number(snapshot.visited_dirs),
+                    snapshot.matched_dirs,
+                    self.speed_tracker.speed_dirs_per_sec
+                )
+            };
+            ui.label(RichText::new(stats_text).size(13.0));
+
+            ui.add_space(12.0);
+
+            if !paused {
+                ui.add(
+                    egui::ProgressBar::new(0.5)
+                        .animate(true)
+                        .desired_width(320.0)
+                        .text("Scan em andamento"),
+                );
+            }
+
+            ui.add_space(20.0);
+
+            if ui
+                .button(
+                    RichText::new(if paused { "▶ Retomar" } else { "⏸ Pausar" }).size(14.0),
+                )
+                .clicked()
+            {
+                self.scan_pause_flag.store(!paused, Ordering::Relaxed);
+            }
+        });
+    }
+
+    fn show_review(&mut self, ui: &mut egui::Ui) {
+        let is_fast_mode = self.active_scan_mode == ScanMode::Fast;
+        let selected_count = self.rows.iter().filter(|r| r.selected).count();
+        let selected_bytes: u64 =
+            self.rows.iter().filter(|r| r.selected).map(|r| r.bytes).sum();
+        let total_count = self.rows.len();
+
+        ui.add_space(6.0);
+
+        // Stats bar
+        ui.horizontal(|ui| {
+            if is_fast_mode {
+                ui.label(format!("Encontrado: {total_count} itens"));
+                ui.separator();
+                ui.label(format!("Selecionado: {selected_count} itens"))
+                    .on_hover_text("Tamanhos não disponíveis no modo Fast");
+            } else {
+                ui.label(format!(
+                    "Encontrado: {total_count} itens  ({})",
+                    format_bytes(self.total_bytes)
+                ));
+                ui.separator();
+                ui.label(format!(
+                    "Selecionado: {selected_count} itens  ({})",
+                    format_bytes(selected_bytes)
+                ));
+            }
+        });
+
+        ui.add_space(4.0);
+
+        // Action buttons
+        ui.horizontal(|ui| {
+            if ui.button("Marcar todos").clicked() {
+                for r in &mut self.rows {
+                    r.selected = true;
+                }
+            }
+            if ui.button("Desmarcar todos").clicked() {
+                for r in &mut self.rows {
+                    r.selected = false;
+                }
+            }
+            let can_clean = !self.is_cleaning && selected_count > 0;
+            if ui
+                .add_enabled(can_clean, egui::Button::new("🗑 Remover selecionados"))
+                .clicked()
+            {
+                let confirm = MessageDialog::new()
+                    .set_level(MessageLevel::Warning)
+                    .set_title("Confirmar remoção")
+                    .set_description(format!(
+                        "Remover {selected_count} itens selecionados? Esta ação é irreversível."
+                    ))
+                    .set_buttons(MessageButtons::YesNo)
+                    .show();
+                if confirm == MessageDialogResult::Yes {
+                    self.start_clean();
+                }
+            }
+            if self.is_cleaning {
+                ui.add(egui::Spinner::new());
+                ui.label("Removendo...");
+            }
+        });
+
+        ui.add_space(4.0);
+
+        // Search bar
+        ui.horizontal(|ui| {
+            ui.label("🔍");
+            let changed = ui
+                .add(
+                    egui::TextEdit::singleline(&mut self.search_query)
+                        .hint_text("Filtrar por caminho ou tipo...")
+                        .desired_width(280.0),
+                )
+                .changed();
+            if changed {
+                self.apply_sort_and_filter();
+            }
+            if !self.search_query.is_empty() {
+                if ui.small_button("✕").clicked() {
+                    self.search_query.clear();
+                    self.apply_sort_and_filter();
+                }
+                ui.label(format!("{} resultado(s)", self.filtered_indices.len()));
+            }
+        });
+
+        ui.add_space(4.0);
+
+        // Column headers (sortable)
+        let col_kind = sort_header_label("Tipo", self.sort_column == SortColumn::Kind, self.sort_asc);
+        let col_path = sort_header_label("Caminho", self.sort_column == SortColumn::Path, self.sort_asc);
+        let col_size = sort_header_label("Tamanho", self.sort_column == SortColumn::Size, self.sort_asc);
+
+        ui.horizontal(|ui| {
+            ui.add_space(20.0); // checkbox width
+            if ui.button(col_kind).clicked() {
+                if self.sort_column == SortColumn::Kind {
+                    self.sort_asc = !self.sort_asc;
+                } else {
+                    self.sort_column = SortColumn::Kind;
+                    self.sort_asc = true;
+                }
+                self.apply_sort_and_filter();
+            }
+            if ui.button(col_path).clicked() {
+                if self.sort_column == SortColumn::Path {
+                    self.sort_asc = !self.sort_asc;
+                } else {
+                    self.sort_column = SortColumn::Path;
+                    self.sort_asc = true;
+                }
+                self.apply_sort_and_filter();
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.button(col_size).clicked() {
+                    if self.sort_column == SortColumn::Size {
+                        self.sort_asc = !self.sort_asc;
+                    } else {
+                        self.sort_column = SortColumn::Size;
+                        self.sort_asc = false;
+                    }
+                    self.apply_sort_and_filter();
+                }
+            });
+        });
+
+        ui.separator();
+
+        // Virtual-scrolling results list
+        let root = PathBuf::from(self.root_path.trim());
+        let indices_snapshot = self.filtered_indices.clone();
+        let num_visible = indices_snapshot.len();
+        let rows = &mut self.rows;
+
+        egui::ScrollArea::vertical()
+            .id_salt("results_scroll")
+            .show_rows(ui, 28.0, num_visible, |ui, row_range| {
+                for display_i in row_range {
+                    let row = &mut rows[indices_snapshot[display_i]];
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut row.selected, "");
+                        ui.label(
+                            RichText::new(&row.kind).color(Color32::from_rgb(30, 102, 161)),
+                        );
+                        let display_path = row
+                            .path
+                            .strip_prefix(&root)
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|_| row.path.display().to_string());
+                        ui.label(display_path);
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if row.has_exact_size {
+                                ui.label(format_bytes(row.bytes));
+                            } else {
+                                ui.label("--");
+                            }
+                        });
+                    });
+                    ui.separator();
+                }
+            });
     }
 }
+
+// ─── egui App ────────────────────────────────────────────────────────────────
 
 impl eframe::App for DesktopCleanerUi {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_background(ctx);
 
-        egui::TopBottomPanel::top("header").show(ctx, |ui| {
+        let is_scanning = matches!(self.step, Step::Scanning);
+        let has_results = !self.rows.is_empty();
+
+        // Tab bar
+        egui::TopBottomPanel::top("tab_bar").show(ctx, |ui| {
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
-                ui.heading(RichText::new("Clear Dev Cache").color(Color32::from_rgb(25, 35, 45)));
+                ui.heading(
+                    RichText::new("Clear Dev Cache")
+                        .size(16.0)
+                        .color(Color32::from_rgb(25, 35, 45)),
+                );
                 ui.separator();
-                ui.label("Passo 1: Configurar | Passo 2: Scan | Passo 3: Revisar e Remover");
-            });
-        });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.add_space(8.0);
-
-            ui.group(|ui| {
-                ui.label(RichText::new("Passo 1 - O que buscar").strong());
-                ui.horizontal(|ui| {
-                    ui.label("Pasta raiz:");
-                    ui.text_edit_singleline(&mut self.root_path);
-                    if ui.button("Selecionar pasta").clicked() {
-                        if let Some(path) = FileDialog::new().pick_folder() {
-                            self.root_path = path.display().to_string();
-                            self.status = "Pasta raiz selecionada".to_string();
-                        }
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Pastas padrão (CSV):");
-                    ui.text_edit_singleline(&mut self.base_targets_csv);
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Modo de scan:");
-                    ui.selectable_value(&mut self.selected_mode, ScanMode::Fast, "Fast")
-                        .on_hover_text("Rápido: encontra as pastas sem calcular tamanhos");
-                    ui.selectable_value(&mut self.selected_mode, ScanMode::Full, "Full")
-                        .on_hover_text("Completo: calcula o tamanho real de cada pasta (mais lento)");
-                });
-                ui.horizontal(|ui| {
-                    if ui.button("Salvar pastas padrão").clicked() {
-                        match self.app.set_base_targets_csv(self.base_targets_csv.clone()) {
-                            Ok(targets) => {
-                                self.available_targets = targets.join(", ");
-                                self.status = "Pastas padrão salvas".to_string();
-                            }
-                            Err(err) => self.status = format!("Erro: {err}"),
-                        }
-                    }
-                    ui.label("Adicionar pasta extra:");
-                    ui.text_edit_singleline(&mut self.custom_target_input);
-                    if ui.button("Adicionar").clicked() {
-                        match self.app.add_custom_target(self.custom_target_input.clone()) {
-                            Ok(targets) => {
-                                self.available_targets = targets.join(", ");
-                                self.custom_target_input.clear();
-                                self.status = "Pasta extra adicionada".to_string();
-                            }
-                            Err(err) => self.status = format!("Erro: {err}"),
-                        }
-                    }
-                });
-                ui.label(format!("Alvos ativos: {}", self.available_targets));
-            });
-
-            ui.add_space(10.0);
-            ui.group(|ui| {
-                ui.label(RichText::new("Passo 2 - Executar scan").strong());
-                let scanning = matches!(self.step, Step::Scanning);
-                let can_scan = !scanning && !self.is_cleaning;
+                let is_configure = matches!(self.step, Step::Configure);
                 if ui
-                    .add_enabled(can_scan, egui::Button::new("Iniciar scan"))
+                    .selectable_label(is_configure, "⚙ Configurar")
+                    .clicked()
+                    && !is_scanning
+                {
+                    self.step = Step::Configure;
+                }
+
+                if is_scanning {
+                    ui.add(egui::Spinner::new().size(14.0));
+                    ui.colored_label(Color32::from_rgb(210, 150, 0), "🔍 Escaneando");
+                } else {
+                    ui.label(RichText::new("🔍 Scan").color(Color32::GRAY));
+                }
+
+                let results_label = if has_results {
+                    format!("📋 Resultados ({})", self.rows.len())
+                } else {
+                    "📋 Resultados".to_string()
+                };
+                let is_review = matches!(self.step, Step::Review);
+                if ui
+                    .add_enabled(
+                        has_results && !is_scanning,
+                        egui::Button::selectable(is_review, results_label),
+                    )
                     .clicked()
                 {
-                    self.start_scan();
-                }
-                if scanning {
-                    let paused = self.scan_pause_flag.load(Ordering::Relaxed);
-                    if ui
-                        .button(if paused { "▶ Retomar scan" } else { "⏸ Pausar scan" })
-                        .clicked()
-                    {
-                        self.scan_pause_flag.store(!paused, Ordering::Relaxed);
-                    }
-                    if paused {
-                        ui.label(RichText::new("⏸ PAUSADO").color(Color32::from_rgb(200, 140, 0)));
-                    } else {
-                        ui.add(egui::Spinner::new());
-                    }
-                    if let Some(start) = self.scan_started_at {
-                        ui.label(format!("{}s", start.elapsed().as_secs()));
-                    }
-                    let snapshot = self.progress_snapshot.unwrap_or(ScanProgressSnapshot {
-                        visited_dirs: 0,
-                        matched_dirs: 0,
-                    });
-                    ui.label(format!(
-                        "Visitadas: {} | Candidatas: {}",
-                        snapshot.visited_dirs,
-                        snapshot.matched_dirs,
-                    ));
-                    if !paused {
-                        ui.add(
-                            egui::ProgressBar::new(0.5)
-                                .animate(true)
-                                .text("Scan em andamento"),
-                        );
-                    }
+                    self.step = Step::Review;
                 }
             });
+            ui.add_space(2.0);
+        });
 
-            ui.add_space(10.0);
-            ui.group(|ui| {
-                let mode_label = match self.scan_last_mode.unwrap_or(self.active_scan_mode) {
-                    ScanMode::Fast => "Fast",
-                    ScanMode::Full => "Full",
-                };
-                ui.label(
-                    RichText::new(format!(
-                        "Passo 3 - Revisar e remover (resultado do modo {mode_label})"
-                    ))
-                    .strong(),
-                );
-                let is_fast_mode = self.active_scan_mode == ScanMode::Fast;
-                let selected_count = self.rows.iter().filter(|r| r.selected).count();
-                let selected_bytes: u64 = self.rows.iter()
-                    .filter(|r| r.selected)
-                    .map(|r| r.bytes)
-                    .sum();
+        // Status bar
+        egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+            ui.add_space(2.0);
+            ui.colored_label(
+                Color32::from_rgb(60, 90, 120),
+                format!("Status: {}", self.status),
+            );
+            ui.add_space(2.0);
+        });
 
-                ui.horizontal(|ui| {
-                    if ui.button("Novo scan").clicked() {
-                        self.step = Step::Configure;
-                        self.rows.clear();
-                        self.total_bytes = 0;
-                        self.progress_snapshot = None;
-                        self.status = "Pronto para novo scan".to_string();
-                    }
-                    if ui.button("Marcar todos").clicked() {
-                        for row in &mut self.rows {
-                            row.selected = true;
-                        }
-                    }
-                    if ui.button("Desmarcar todos").clicked() {
-                        for row in &mut self.rows {
-                            row.selected = false;
-                        }
-                    }
-                    let can_clean = !matches!(self.step, Step::Scanning) && !self.is_cleaning;
-                    if ui
-                        .add_enabled(can_clean, egui::Button::new("Remover selecionados"))
-                        .clicked()
-                    {
-                        let confirm = MessageDialog::new()
-                            .set_level(MessageLevel::Warning)
-                            .set_title("Confirmar remoção")
-                            .set_description(format!(
-                                "Remover {selected_count} itens selecionados? Esta ação é irreversível."
-                            ))
-                            .set_buttons(MessageButtons::YesNo)
-                            .show();
-                        if confirm == MessageDialogResult::Yes {
-                            self.start_clean();
-                        }
-                    }
-                    if self.is_cleaning {
-                        ui.add(egui::Spinner::new());
-                        ui.label("Removendo...");
-                    }
-                });
-                ui.horizontal(|ui| {
-                    if is_fast_mode {
-                        ui.label(format!("Encontrado: {} itens", self.rows.len()));
-                        ui.separator();
-                        ui.label(format!("Selecionado: {selected_count} itens"))
-                            .on_hover_text("Tamanhos não disponíveis no modo Fast");
-                    } else {
-                        ui.label(format!("Encontrado: {} itens ({})", self.rows.len(), format_bytes(self.total_bytes)));
-                        ui.separator();
-                        ui.label(format!("Selecionado: {selected_count} itens ({})", format_bytes(selected_bytes)));
-                    }
-                });
-
-                let root = PathBuf::from(self.root_path.trim());
-                let num_rows = self.rows.len();
-                let rows = &mut self.rows;
-                egui::ScrollArea::vertical()
-                    .max_height(350.0)
-                    .show_rows(ui, 28.0, num_rows, |ui, row_range| {
-                        for idx in row_range {
-                            let row = &mut rows[idx];
-                            ui.horizontal(|ui| {
-                                ui.checkbox(&mut row.selected, "");
-                                ui.label(RichText::new(&row.kind).color(Color32::from_rgb(30, 102, 161)));
-                                let display_path = row
-                                    .path
-                                    .strip_prefix(&root)
-                                    .map(|p| p.display().to_string())
-                                    .unwrap_or_else(|_| row.path.display().to_string());
-                                ui.label(display_path);
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if row.has_exact_size {
-                                        ui.label(format_bytes(row.bytes));
-                                    } else {
-                                        ui.label("--");
-                                    }
-                                });
-                            });
-                            ui.separator();
-                        }
-                    });
-            });
-
-            ui.add_space(8.0);
-            ui.colored_label(Color32::from_rgb(24, 58, 87), format!("Status: {}", self.status));
+        // Main content
+        egui::CentralPanel::default().show(ctx, |ui| match self.step {
+            Step::Configure => self.show_configure(ui),
+            Step::Scanning => self.show_scanning(ui),
+            Step::Review => self.show_review(ui),
         });
     }
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+fn build_targets_list(learning: &domain::AppLearningState) -> Vec<TargetEntry> {
+    let defaults: HashSet<String> = default_targets_vec().into_iter().collect();
+    let rules = domain::GarbageRules::new(&learning.base_targets, &learning.custom_targets);
+    let mut list: Vec<TargetEntry> = rules
+        .all_targets()
+        .into_iter()
+        .map(|name| TargetEntry { is_custom: !defaults.contains(&name), name })
+        .collect();
+    list.sort_by(|a, b| a.is_custom.cmp(&b.is_custom).then(a.name.cmp(&b.name)));
+    list
+}
+
+fn sort_header_label(title: &str, is_active: bool, sort_asc: bool) -> String {
+    if is_active {
+        format!("{} {}", title, if sort_asc { "↑" } else { "↓" })
+    } else {
+        format!("{} ↕", title)
+    }
+}
+
+fn format_number(n: usize) -> String {
+    let s = n.to_string();
+    let mut chars: Vec<char> = Vec::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            chars.push('.');
+        }
+        chars.push(c);
+    }
+    chars.into_iter().rev().collect()
 }
 
 fn format_bytes(bytes: u64) -> String {

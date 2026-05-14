@@ -67,6 +67,19 @@ impl CleanerApp {
         Ok(result)
     }
 
+    pub fn remove_target(&self, name: &str) -> Result<Vec<String>> {
+        let mut learning = self.learning_store.load()?;
+        let normalized = name.trim().to_ascii_lowercase();
+        learning.base_targets.retain(|t| t != &normalized);
+        learning.custom_targets.retain(|t| t != &normalized);
+        if learning.base_targets.is_empty() && learning.custom_targets.is_empty() {
+            learning.base_targets = default_targets_vec();
+        }
+        self.learning_store.save(&learning)?;
+        let rules = GarbageRules::new(&learning.base_targets, &learning.custom_targets);
+        Ok(rules.all_targets())
+    }
+
     pub fn add_custom_target(&self, value: String) -> Result<Vec<String>> {
         let mut learning = self.learning_store.load()?;
         let normalized = value.trim().to_ascii_lowercase();
