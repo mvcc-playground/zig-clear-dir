@@ -1,12 +1,14 @@
 use anyhow::Result;
 use application::{CleanerApp, ScanProgressPort, ScanProgressSnapshot};
-use domain::{CleanRequest, ScanMode, ScanResult, default_targets_vec};
+use domain::{CleanRequest, CleanResult, ScanMode, ScanResult, default_targets_vec};
 use eframe::egui::{self, Color32, RichText};
-use platform::{NativeCleaner, NativeScanner};
+use platform::{NativeCleaner, NativeScanner, system_excluded_roots};
 use preferences::JsonLearningStore;
-use rfd::FileDialog;
+use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
@@ -54,22 +56,29 @@ struct DesktopCleanerUi {
     rows: Vec<RowState>,
     scan_rx: Option<Receiver<Result<ScanResult, String>>>,
     scan_progress_rx: Option<Receiver<ScanProgressSnapshot>>,
-    clean_rx: Option<Receiver<Result<(usize, u64), String>>>,
+    clean_rx: Option<Receiver<Result<CleanResult, String>>>,
     scan_started_at: Option<Instant>,
     scan_min_visible_until: Option<Instant>,
     is_cleaning: bool,
     selected_mode: ScanMode,
     active_scan_mode: ScanMode,
+    scan_last_mode: Option<ScanMode>,
     progress_snapshot: Option<ScanProgressSnapshot>,
+    scan_pause_flag: Arc<AtomicBool>,
 }
 
 struct ChannelProgress {
     tx: mpsc::Sender<ScanProgressSnapshot>,
+    paused: Arc<AtomicBool>,
 }
 
 impl ScanProgressPort for ChannelProgress {
     fn on_progress(&self, snapshot: ScanProgressSnapshot) {
         let _ = self.tx.send(snapshot);
+    }
+
+    fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
     }
 }
 
@@ -86,16 +95,16 @@ impl DesktopCleanerUi {
                 (
                     base.join(","),
                     rules.all_targets().join(", "),
-                    "Defina as pastas e clique em Iniciar Scan".to_string(),
+                    "Defina as pastas e clique em Iniciar scan".to_string(),
                 )
             }
             Err(e) => {
-                eprintln!("Aviso: falha ao carregar estado ({e}), usando padroes");
+                eprintln!("Aviso: falha ao carregar estado ({e}), usando padrões");
                 let base = default_targets_vec();
                 (
                     base.join(","),
                     base.join(", "),
-                    "Estado local invalido, usando configuracao padrao".to_string(),
+                    "Estado local inválido, usando configuração padrão".to_string(),
                 )
             }
         };
@@ -117,11 +126,21 @@ impl DesktopCleanerUi {
             is_cleaning: false,
             selected_mode: ScanMode::Fast,
             active_scan_mode: ScanMode::Fast,
+            scan_last_mode: None,
             progress_snapshot: None,
+            scan_pause_flag: Arc::new(AtomicBool::new(false)),
         }
     }
 
     fn start_scan(&mut self) {
+        match self.app.set_base_targets_csv(self.base_targets_csv.clone()) {
+            Ok(targets) => self.available_targets = targets.join(", "),
+            Err(err) => {
+                self.status = format!("Erro ao salvar alvos padrão: {err}");
+                return;
+            }
+        }
+
         let root = self.root_path.trim().to_string();
         if root.is_empty() {
             self.status = "Informe a pasta raiz".to_string();
@@ -129,17 +148,24 @@ impl DesktopCleanerUi {
         }
         let root_path = PathBuf::from(&root);
         if !root_path.exists() || !root_path.is_dir() {
-            self.status = "Pasta raiz invalida ou inexistente".to_string();
+            self.status = "Pasta raiz inválida ou inexistente".to_string();
             return;
         }
+
+        let now = Instant::now();
         self.step = Step::Scanning;
         self.status = "Escaneando...".to_string();
-        self.scan_started_at = Some(Instant::now());
-        self.scan_min_visible_until = Some(Instant::now() + Duration::from_millis(800));
+        self.scan_started_at = Some(now);
+        self.scan_min_visible_until = Some(now + Duration::from_millis(800));
         self.active_scan_mode = self.selected_mode;
+        self.scan_last_mode = Some(self.selected_mode);
         self.rows.clear();
         self.total_bytes = 0;
-        self.progress_snapshot = None;
+        self.progress_snapshot = Some(ScanProgressSnapshot {
+            visited_dirs: 0,
+            matched_dirs: 0,
+        });
+        self.scan_pause_flag.store(false, Ordering::Relaxed);
 
         let app = self.app.clone();
         let (tx, rx) = mpsc::channel();
@@ -147,10 +173,15 @@ impl DesktopCleanerUi {
         self.scan_rx = Some(rx);
         self.scan_progress_rx = Some(progress_rx);
         let mode = self.selected_mode;
+        let pause_flag = self.scan_pause_flag.clone();
+        let excluded = system_excluded_roots();
         std::thread::spawn(move || {
-            let reporter = ChannelProgress { tx: progress_tx };
+            let reporter = ChannelProgress {
+                tx: progress_tx,
+                paused: pause_flag,
+            };
             let result = app
-                .scan_with_mode_and_progress(root_path, mode, Some(&reporter))
+                .scan_with_mode_and_progress(root_path, mode, Some(&reporter), excluded)
                 .map_err(|e| e.to_string());
             let _ = tx.send(result);
         });
@@ -159,7 +190,7 @@ impl DesktopCleanerUi {
     fn start_clean(&mut self) {
         let root = self.root_path.trim().to_string();
         if root.is_empty() {
-            self.status = "Informe a pasta raiz valida".to_string();
+            self.status = "Informe a pasta raiz válida".to_string();
             return;
         }
         let selected_paths = self
@@ -182,10 +213,7 @@ impl DesktopCleanerUi {
                 scan_root: PathBuf::from(root),
                 selected_paths,
             };
-            let result = app
-                .clean(req)
-                .map(|v| (v.removed_count, v.removed_bytes))
-                .map_err(|e| e.to_string());
+            let result = app.clean(req).map_err(|e| e.to_string());
             let _ = tx.send(result);
         });
     }
@@ -195,9 +223,7 @@ impl DesktopCleanerUi {
             let mut keep = true;
             loop {
                 match progress_rx.try_recv() {
-                    Ok(snapshot) => {
-                        self.progress_snapshot = Some(snapshot);
-                    }
+                    Ok(snapshot) => self.progress_snapshot = Some(snapshot),
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
                         keep = false;
@@ -209,6 +235,7 @@ impl DesktopCleanerUi {
                 self.scan_progress_rx = Some(progress_rx);
             }
         }
+
         if let Some(rx) = self.scan_rx.take() {
             if let Some(until) = self.scan_min_visible_until {
                 if Instant::now() < until {
@@ -232,7 +259,7 @@ impl DesktopCleanerUi {
                                 selected: c.selected,
                             })
                             .collect();
-                        self.status = format!("Scan concluido: {} itens", self.rows.len());
+                        self.status = format!("Scan concluído: {} itens", self.rows.len());
                         self.step = Step::Review;
                         self.scan_min_visible_until = None;
                         self.scan_started_at = None;
@@ -251,28 +278,30 @@ impl DesktopCleanerUi {
                     ctx.request_repaint_after(Duration::from_millis(60));
                 }
                 Err(TryRecvError::Disconnected) => {
-                    self.status = "Falha de comunicacao no scan".to_string();
+                    self.status = "Falha de comunicação no scan".to_string();
                     self.step = Step::Configure;
                     self.scan_progress_rx = None;
                 }
             }
         }
+
         if let Some(rx) = self.clean_rx.take() {
             match rx.try_recv() {
                 Ok(result) => match result {
-                    Ok((removed_count, removed_bytes)) => {
-                        self.rows.retain(|r| !r.selected);
+                    Ok(done) => {
+                        let removed_set: HashSet<PathBuf> = done.removed_paths.into_iter().collect();
+                        self.rows.retain(|r| !removed_set.contains(&r.path));
                         self.total_bytes = self.rows.iter().map(|r| r.bytes).sum();
                         self.status = format!(
                             "Removidos {} itens ({})",
-                            removed_count,
-                            format_bytes(removed_bytes)
+                            done.removed_count,
+                            format_bytes(done.removed_bytes)
                         );
                         self.step = Step::Review;
                         self.is_cleaning = false;
                     }
                     Err(err) => {
-                        self.status = format!("Erro na remocao: {err}");
+                        self.status = format!("Erro na remoção: {err}");
                         self.is_cleaning = false;
                     }
                 },
@@ -281,7 +310,7 @@ impl DesktopCleanerUi {
                     ctx.request_repaint_after(Duration::from_millis(60));
                 }
                 Err(TryRecvError::Disconnected) => {
-                    self.status = "Falha de comunicacao na remocao".to_string();
+                    self.status = "Falha de comunicação na remoção".to_string();
                     self.is_cleaning = false;
                 }
             }
@@ -292,9 +321,6 @@ impl DesktopCleanerUi {
 impl eframe::App for DesktopCleanerUi {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_background(ctx);
-        if matches!(self.step, Step::Scanning) || self.is_cleaning {
-            ctx.request_repaint_after(Duration::from_millis(60));
-        }
 
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -320,20 +346,22 @@ impl eframe::App for DesktopCleanerUi {
                     }
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Pastas padrao (CSV):");
+                    ui.label("Pastas padrão (CSV):");
                     ui.text_edit_singleline(&mut self.base_targets_csv);
                 });
                 ui.horizontal(|ui| {
                     ui.label("Modo de scan:");
-                    ui.selectable_value(&mut self.selected_mode, ScanMode::Fast, "Fast");
-                    ui.selectable_value(&mut self.selected_mode, ScanMode::Full, "Full");
+                    ui.selectable_value(&mut self.selected_mode, ScanMode::Fast, "Fast")
+                        .on_hover_text("Rápido: encontra as pastas sem calcular tamanhos");
+                    ui.selectable_value(&mut self.selected_mode, ScanMode::Full, "Full")
+                        .on_hover_text("Completo: calcula o tamanho real de cada pasta (mais lento)");
                 });
                 ui.horizontal(|ui| {
-                    if ui.button("Salvar pastas padrao").clicked() {
+                    if ui.button("Salvar pastas padrão").clicked() {
                         match self.app.set_base_targets_csv(self.base_targets_csv.clone()) {
                             Ok(targets) => {
                                 self.available_targets = targets.join(", ");
-                                self.status = "Pastas padrao salvas".to_string();
+                                self.status = "Pastas padrão salvas".to_string();
                             }
                             Err(err) => self.status = format!("Erro: {err}"),
                         }
@@ -359,39 +387,74 @@ impl eframe::App for DesktopCleanerUi {
                 ui.label(RichText::new("Passo 2 - Executar scan").strong());
                 let scanning = matches!(self.step, Step::Scanning);
                 let can_scan = !scanning && !self.is_cleaning;
-                let scan_button = ui.add_enabled(can_scan, egui::Button::new("Iniciar Scan"));
-                if scan_button.clicked() {
+                if ui
+                    .add_enabled(can_scan, egui::Button::new("Iniciar scan"))
+                    .clicked()
+                {
                     self.start_scan();
                 }
                 if scanning {
-                    ui.add(egui::Spinner::new());
-                    if let Some(start) = self.scan_started_at {
-                        ui.label(format!("Escaneando... {}s", start.elapsed().as_secs()));
+                    let paused = self.scan_pause_flag.load(Ordering::Relaxed);
+                    if ui
+                        .button(if paused { "▶ Retomar scan" } else { "⏸ Pausar scan" })
+                        .clicked()
+                    {
+                        self.scan_pause_flag.store(!paused, Ordering::Relaxed);
                     }
-                    if let Some(snapshot) = self.progress_snapshot {
-                        ui.label(format!(
-                            "Visitadas: {} | Candidatas: {}",
-                            snapshot.visited_dirs, snapshot.matched_dirs
-                        ));
+                    if paused {
+                        ui.label(RichText::new("⏸ PAUSADO").color(Color32::from_rgb(200, 140, 0)));
                     } else {
-                        ui.label("Visitadas: 0 | Candidatas: 0");
+                        ui.add(egui::Spinner::new());
                     }
-                    let phase = self
-                        .scan_started_at
-                        .map(|s| ((s.elapsed().as_millis() % 1000) as f32) / 1000.0)
-                        .unwrap_or(0.4);
-                    ui.add(
-                        egui::ProgressBar::new(phase)
-                            .animate(true)
-                            .text("Scan em andamento"),
-                    );
+                    if let Some(start) = self.scan_started_at {
+                        ui.label(format!("{}s", start.elapsed().as_secs()));
+                    }
+                    let snapshot = self.progress_snapshot.unwrap_or(ScanProgressSnapshot {
+                        visited_dirs: 0,
+                        matched_dirs: 0,
+                    });
+                    ui.label(format!(
+                        "Visitadas: {} | Candidatas: {}",
+                        snapshot.visited_dirs,
+                        snapshot.matched_dirs,
+                    ));
+                    if !paused {
+                        ui.add(
+                            egui::ProgressBar::new(0.5)
+                                .animate(true)
+                                .text("Scan em andamento"),
+                        );
+                    }
                 }
             });
 
             ui.add_space(10.0);
             ui.group(|ui| {
-                ui.label(RichText::new("Passo 3 - Revisar e remover").strong());
+                let mode_label = match self.scan_last_mode.unwrap_or(self.active_scan_mode) {
+                    ScanMode::Fast => "Fast",
+                    ScanMode::Full => "Full",
+                };
+                ui.label(
+                    RichText::new(format!(
+                        "Passo 3 - Revisar e remover (resultado do modo {mode_label})"
+                    ))
+                    .strong(),
+                );
+                let is_fast_mode = self.active_scan_mode == ScanMode::Fast;
+                let selected_count = self.rows.iter().filter(|r| r.selected).count();
+                let selected_bytes: u64 = self.rows.iter()
+                    .filter(|r| r.selected)
+                    .map(|r| r.bytes)
+                    .sum();
+
                 ui.horizontal(|ui| {
+                    if ui.button("Novo scan").clicked() {
+                        self.step = Step::Configure;
+                        self.rows.clear();
+                        self.total_bytes = 0;
+                        self.progress_snapshot = None;
+                        self.status = "Pronto para novo scan".to_string();
+                    }
                     if ui.button("Marcar todos").clicked() {
                         for row in &mut self.rows {
                             row.selected = true;
@@ -407,37 +470,64 @@ impl eframe::App for DesktopCleanerUi {
                         .add_enabled(can_clean, egui::Button::new("Remover selecionados"))
                         .clicked()
                     {
-                        self.start_clean();
+                        let confirm = MessageDialog::new()
+                            .set_level(MessageLevel::Warning)
+                            .set_title("Confirmar remoção")
+                            .set_description(format!(
+                                "Remover {selected_count} itens selecionados? Esta ação é irreversível."
+                            ))
+                            .set_buttons(MessageButtons::YesNo)
+                            .show();
+                        if confirm == MessageDialogResult::Yes {
+                            self.start_clean();
+                        }
                     }
                     if self.is_cleaning {
                         ui.add(egui::Spinner::new());
                         ui.label("Removendo...");
                     }
-                    let total_label = if self.active_scan_mode == ScanMode::Fast {
-                        "-- (modo fast sem sizing)".to_string()
-                    } else {
-                        format_bytes(self.total_bytes)
-                    };
-                    ui.label(format!("Total: {}", total_label));
                 });
-
-                egui::ScrollArea::vertical().max_height(350.0).show(ui, |ui| {
-                    for row in &mut self.rows {
-                        ui.horizontal(|ui| {
-                            ui.checkbox(&mut row.selected, "");
-                            ui.label(RichText::new(&row.kind).color(Color32::from_rgb(30, 102, 161)));
-                            ui.label(row.path.display().to_string());
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if row.has_exact_size {
-                                    ui.label(format_bytes(row.bytes));
-                                } else {
-                                    ui.label("--");
-                                }
-                            });
-                        });
+                ui.horizontal(|ui| {
+                    if is_fast_mode {
+                        ui.label(format!("Encontrado: {} itens", self.rows.len()));
                         ui.separator();
+                        ui.label(format!("Selecionado: {selected_count} itens"))
+                            .on_hover_text("Tamanhos não disponíveis no modo Fast");
+                    } else {
+                        ui.label(format!("Encontrado: {} itens ({})", self.rows.len(), format_bytes(self.total_bytes)));
+                        ui.separator();
+                        ui.label(format!("Selecionado: {selected_count} itens ({})", format_bytes(selected_bytes)));
                     }
                 });
+
+                let root = PathBuf::from(self.root_path.trim());
+                let num_rows = self.rows.len();
+                let rows = &mut self.rows;
+                egui::ScrollArea::vertical()
+                    .max_height(350.0)
+                    .show_rows(ui, 28.0, num_rows, |ui, row_range| {
+                        for idx in row_range {
+                            let row = &mut rows[idx];
+                            ui.horizontal(|ui| {
+                                ui.checkbox(&mut row.selected, "");
+                                ui.label(RichText::new(&row.kind).color(Color32::from_rgb(30, 102, 161)));
+                                let display_path = row
+                                    .path
+                                    .strip_prefix(&root)
+                                    .map(|p| p.display().to_string())
+                                    .unwrap_or_else(|_| row.path.display().to_string());
+                                ui.label(display_path);
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if row.has_exact_size {
+                                        ui.label(format_bytes(row.bytes));
+                                    } else {
+                                        ui.label("--");
+                                    }
+                                });
+                            });
+                            ui.separator();
+                        }
+                    });
             });
 
             ui.add_space(8.0);

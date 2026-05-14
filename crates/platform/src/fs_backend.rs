@@ -7,7 +7,11 @@ use domain::{
 use rayon::prelude::*;
 use std::fs;
 use std::path::Path;
+use std::thread;
+use std::time::Duration;
 use walkdir::WalkDir;
+
+use crate::{is_system_excluded, is_system_protected_name};
 
 pub struct NativeScanner;
 pub struct NativeCleaner;
@@ -79,35 +83,43 @@ fn discover_walkdir(
     let mut out = Vec::new();
     let mut visited_dirs = 0usize;
     let mut matched_dirs = 0usize;
-    for entry in WalkDir::new(&request.root)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_dir())
-    {
-        visited_dirs += 1;
+    let mut iter = WalkDir::new(&request.root).follow_links(false).into_iter();
+    loop {
+        let entry = match iter.next() {
+            None => break,
+            Some(Err(_)) => continue,
+            Some(Ok(e)) => e,
+        };
+        if !entry.file_type().is_dir() {
+            continue;
+        }
         let path = entry.path();
+        if is_system_excluded(path, &request.excluded_roots) {
+            iter.skip_current_dir();
+            continue;
+        }
+        if let Some(p) = progress {
+            while p.is_paused() {
+                thread::sleep(Duration::from_millis(30));
+            }
+        }
+        visited_dirs += 1;
         if let Some(kind) = rules.matches_dir_name(path) {
             matched_dirs += 1;
             out.push(PendingCandidate {
                 path: path.to_path_buf(),
                 kind,
             });
+            iter.skip_current_dir();
         }
-        if visited_dirs % 256 == 0 {
-            if let Some(progress) = progress {
-                progress.on_progress(ScanProgressSnapshot {
-                    visited_dirs,
-                    matched_dirs,
-                });
+        if visited_dirs % 128 == 0 {
+            if let Some(p) = progress {
+                p.on_progress(ScanProgressSnapshot { visited_dirs, matched_dirs });
             }
         }
     }
-    if let Some(progress) = progress {
-        progress.on_progress(ScanProgressSnapshot {
-            visited_dirs,
-            matched_dirs,
-        });
+    if let Some(p) = progress {
+        p.on_progress(ScanProgressSnapshot { visited_dirs, matched_dirs });
     }
     Ok(out)
 }
@@ -149,6 +161,14 @@ fn discover_windows_native(
     let mut matched_dirs = 0usize;
 
     while let Some(current) = stack.pop() {
+        if is_system_excluded(&current, &request.excluded_roots) {
+            continue;
+        }
+        if let Some(progress) = progress {
+            while progress.is_paused() {
+                thread::sleep(Duration::from_millis(30));
+            }
+        }
         visited_dirs += 1;
         let pattern = join_pattern(&current);
         let mut data = WIN32_FIND_DATAW::default();
@@ -172,7 +192,7 @@ fn discover_windows_native(
                 let attrs = data.dwFileAttributes;
                 let is_dir = (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
                 let is_reparse = (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
-                if is_dir && !is_reparse {
+                if is_dir && !is_reparse && !is_system_protected_name(&name) {
                     let mut child = current.clone();
                     child.push(&name);
                     if let Some(kind) = rules.matches_dir_name(&child) {
@@ -191,7 +211,7 @@ fn discover_windows_native(
                 break;
             }
         }
-        if visited_dirs % 256 == 0 {
+        if visited_dirs % 128 == 0 {
             if let Some(progress) = progress {
                 progress.on_progress(ScanProgressSnapshot {
                     visited_dirs,
@@ -217,6 +237,7 @@ impl CleanerPort for NativeCleaner {
     fn clean(&self, request: &CleanRequest) -> Result<CleanResult> {
         let mut removed_count = 0usize;
         let mut removed_bytes = 0u64;
+        let mut removed_paths = Vec::new();
         let scan_root = request
             .scan_root
             .canonicalize()
@@ -241,10 +262,12 @@ impl CleanerPort for NativeCleaner {
                 .with_context(|| format!("failed to remove {:?}", canonical))?;
             removed_count += 1;
             removed_bytes += bytes;
+            removed_paths.push(path.clone());
         }
         Ok(CleanResult {
             removed_count,
             removed_bytes,
+            removed_paths,
         })
     }
 }

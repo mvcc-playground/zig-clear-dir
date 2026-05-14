@@ -5,6 +5,8 @@ use std::path::PathBuf;
 pub struct ScanRequest {
     pub root: PathBuf,
     pub mode: ScanMode,
+    #[serde(default)]
+    pub excluded_roots: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -37,6 +39,7 @@ pub struct CleanRequest {
 pub struct CleanResult {
     pub removed_count: usize,
     pub removed_bytes: u64,
+    pub removed_paths: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

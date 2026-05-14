@@ -9,6 +9,9 @@ pub struct ScanProgressSnapshot {
 
 pub trait ScanProgressPort: Send + Sync {
     fn on_progress(&self, snapshot: ScanProgressSnapshot);
+    fn is_paused(&self) -> bool {
+        false
+    }
 }
 
 pub trait ScannerPort: Send + Sync {
