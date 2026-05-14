@@ -24,6 +24,7 @@ fn main() {
         root: PathBuf::from(root),
         mode: scan_mode,
         excluded_roots: Vec::new(),
+        active_targets: Vec::new(),
     };
 
     println!("scan benchmark start");

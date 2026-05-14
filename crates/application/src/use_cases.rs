@@ -31,7 +31,7 @@ impl CleanerApp {
     }
 
     pub fn scan_with_mode(&self, root: PathBuf, mode: ScanMode) -> Result<ScanResult> {
-        self.scan_with_mode_and_progress(root, mode, None, Vec::new())
+        self.scan_with_mode_and_progress(root, mode, None, Vec::new(), Vec::new())
     }
 
     pub fn scan_with_mode_and_progress(
@@ -40,6 +40,7 @@ impl CleanerApp {
         mode: ScanMode,
         progress: Option<&dyn ScanProgressPort>,
         excluded_roots: Vec<PathBuf>,
+        active_targets: Vec<String>,
     ) -> Result<ScanResult> {
         let mut learning = self.learning_store.load()?;
         if !learning.recent_roots.iter().any(|v| v == &root) {
@@ -48,7 +49,7 @@ impl CleanerApp {
             self.learning_store.save(&learning)?;
         }
 
-        let request = ScanRequest { root, mode, excluded_roots };
+        let request = ScanRequest { root, mode, excluded_roots, active_targets };
         let mut candidates = self.scanner.scan(&request, &learning, progress)?;
         candidates.sort_by(|a, b| b.bytes.cmp(&a.bytes));
         let total_bytes = candidates.iter().map(|v| v.bytes).sum();

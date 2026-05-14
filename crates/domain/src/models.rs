@@ -7,6 +7,8 @@ pub struct ScanRequest {
     pub mode: ScanMode,
     #[serde(default)]
     pub excluded_roots: Vec<PathBuf>,
+    #[serde(default)]
+    pub active_targets: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

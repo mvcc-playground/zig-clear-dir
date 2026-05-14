@@ -48,6 +48,7 @@ struct RowState {
 struct TargetEntry {
     name: String,
     is_custom: bool,
+    enabled: bool,
 }
 
 #[derive(PartialEq, Clone, Copy, Default)]
@@ -133,6 +134,7 @@ struct DesktopCleanerUi {
     progress_snapshot: Option<ScanProgressSnapshot>,
     speed_tracker: SpeedTracker,
     is_cleaning: bool,
+    clean_total: usize,
 
     // Resultados
     rows: Vec<RowState>,
@@ -156,7 +158,7 @@ impl DesktopCleanerUi {
                 eprintln!("Aviso: falha ao carregar estado ({e}), usando padrões");
                 let defaults: Vec<TargetEntry> = default_targets_vec()
                     .into_iter()
-                    .map(|name| TargetEntry { name, is_custom: false })
+                    .map(|name| TargetEntry { name, is_custom: false, enabled: true })
                     .collect();
                 (defaults, "Estado local inválido, usando configuração padrão".to_string())
             }
@@ -169,17 +171,18 @@ impl DesktopCleanerUi {
             root_path: String::new(),
             targets_list,
             new_target_input: String::new(),
-            selected_mode: ScanMode::Fast,
+            selected_mode: ScanMode::Full,
             scan_rx: None,
             scan_progress_rx: None,
             clean_rx: None,
             scan_started_at: None,
             scan_min_visible_until: None,
             scan_pause_flag: Arc::new(AtomicBool::new(false)),
-            active_scan_mode: ScanMode::Fast,
+            active_scan_mode: ScanMode::Full,
             progress_snapshot: Some(ScanProgressSnapshot { visited_dirs: 0, matched_dirs: 0 }),
             speed_tracker: SpeedTracker::new(),
             is_cleaning: false,
+            clean_total: 0,
             rows: Vec::new(),
             total_bytes: 0,
             sort_column: SortColumn::Size,
@@ -192,7 +195,19 @@ impl DesktopCleanerUi {
     fn rebuild_targets_list(&mut self) {
         match self.app.load_learning() {
             Ok(learning) => {
-                self.targets_list = build_targets_list(&learning);
+                let prev_disabled: HashSet<String> = self
+                    .targets_list
+                    .iter()
+                    .filter(|e| !e.enabled)
+                    .map(|e| e.name.clone())
+                    .collect();
+                let mut list = build_targets_list(&learning);
+                for e in &mut list {
+                    if prev_disabled.contains(&e.name) {
+                        e.enabled = false;
+                    }
+                }
+                self.targets_list = list;
             }
             Err(e) => {
                 self.status = format!("Erro ao carregar targets: {e}");
@@ -247,6 +262,13 @@ impl DesktopCleanerUi {
         self.scan_pause_flag.store(false, Ordering::Relaxed);
         self.speed_tracker.reset();
 
+        let active_targets: Vec<String> = self
+            .targets_list
+            .iter()
+            .filter(|e| e.enabled)
+            .map(|e| e.name.clone())
+            .collect();
+
         let app = self.app.clone();
         let (tx, rx) = mpsc::channel();
         let (progress_tx, progress_rx) = mpsc::channel();
@@ -258,7 +280,7 @@ impl DesktopCleanerUi {
         std::thread::spawn(move || {
             let reporter = ChannelProgress { tx: progress_tx, paused: pause_flag };
             let result = app
-                .scan_with_mode_and_progress(root_path, mode, Some(&reporter), excluded)
+                .scan_with_mode_and_progress(root_path, mode, Some(&reporter), excluded, active_targets)
                 .map_err(|e| e.to_string());
             let _ = tx.send(result);
         });
@@ -280,7 +302,8 @@ impl DesktopCleanerUi {
             self.status = "Nenhum item selecionado".to_string();
             return;
         }
-        self.status = "Removendo itens selecionados...".to_string();
+        self.clean_total = selected_paths.len();
+        self.status = format!("Removendo {} itens...", selected_paths.len());
         self.is_cleaning = true;
         let app = self.app.clone();
         let (tx, rx) = mpsc::channel();
@@ -469,8 +492,9 @@ impl DesktopCleanerUi {
             // Target entries
             let mut to_remove: Option<String> = None;
             egui::ScrollArea::vertical().max_height(160.0).id_salt("targets_scroll").show(ui, |ui| {
-                for entry in &self.targets_list {
+                for entry in &mut self.targets_list {
                     ui.horizontal(|ui| {
+                        ui.checkbox(&mut entry.enabled, "");
                         let label = if entry.is_custom {
                             RichText::new(&entry.name).color(Color32::from_rgb(40, 150, 80))
                         } else {
@@ -485,7 +509,7 @@ impl DesktopCleanerUi {
                             );
                         }
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui.small_button("✕").on_hover_text("Remover").clicked() {
+                            if ui.small_button("✕").on_hover_text("Remover permanentemente").clicked() {
                                 to_remove = Some(entry.name.clone());
                             }
                         });
@@ -500,6 +524,18 @@ impl DesktopCleanerUi {
                     }
                     Err(e) => self.status = format!("Erro: {e}"),
                 }
+            }
+
+            // Hint: enabled count
+            let enabled_count = self.targets_list.iter().filter(|e| e.enabled).count();
+            let total_count = self.targets_list.len();
+            if enabled_count < total_count {
+                ui.add_space(2.0);
+                ui.label(
+                    RichText::new(format!("{enabled_count} de {total_count} targets ativos no próximo scan"))
+                        .small()
+                        .color(Color32::from_rgb(180, 130, 0)),
+                );
             }
         });
 
@@ -589,6 +625,28 @@ impl DesktopCleanerUi {
     }
 
     fn show_review(&mut self, ui: &mut egui::Ui) {
+        // Cleaning overlay — shows prominently while deletion is in progress
+        if self.is_cleaning {
+            ui.add_space(40.0);
+            ui.vertical_centered(|ui| {
+                ui.add(egui::Spinner::new().size(48.0));
+                ui.add_space(16.0);
+                ui.label(
+                    RichText::new(format!("Removendo {} itens...", self.clean_total))
+                        .size(18.0)
+                        .strong(),
+                );
+                ui.add_space(8.0);
+                ui.add(
+                    egui::ProgressBar::new(0.5)
+                        .animate(true)
+                        .desired_width(300.0)
+                        .text("Aguarde, isso pode levar alguns segundos"),
+                );
+            });
+            return;
+        }
+
         let is_fast_mode = self.active_scan_mode == ScanMode::Fast;
         let selected_count = self.rows.iter().filter(|r| r.selected).count();
         let selected_bytes: u64 =
@@ -631,7 +689,7 @@ impl DesktopCleanerUi {
                     r.selected = false;
                 }
             }
-            let can_clean = !self.is_cleaning && selected_count > 0;
+            let can_clean = selected_count > 0;
             if ui
                 .add_enabled(can_clean, egui::Button::new("🗑 Remover selecionados"))
                 .clicked()
@@ -647,10 +705,6 @@ impl DesktopCleanerUi {
                 if confirm == MessageDialogResult::Yes {
                     self.start_clean();
                 }
-            }
-            if self.is_cleaning {
-                ui.add(egui::Spinner::new());
-                ui.label("Removendo...");
             }
         });
 
@@ -838,7 +892,7 @@ fn build_targets_list(learning: &domain::AppLearningState) -> Vec<TargetEntry> {
     let mut list: Vec<TargetEntry> = rules
         .all_targets()
         .into_iter()
-        .map(|name| TargetEntry { is_custom: !defaults.contains(&name), name })
+        .map(|name| TargetEntry { is_custom: !defaults.contains(&name), name, enabled: true })
         .collect();
     list.sort_by(|a, b| a.is_custom.cmp(&b.is_custom).then(a.name.cmp(&b.name)));
     list

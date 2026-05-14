@@ -79,7 +79,11 @@ fn discover_walkdir(
     learning: &AppLearningState,
     progress: Option<&dyn ScanProgressPort>,
 ) -> Result<Vec<PendingCandidate>> {
-    let rules = GarbageRules::new(&learning.base_targets, &learning.custom_targets);
+    let rules = if !request.active_targets.is_empty() {
+        GarbageRules::new(&request.active_targets, &[])
+    } else {
+        GarbageRules::new(&learning.base_targets, &learning.custom_targets)
+    };
     let mut out = Vec::new();
     let mut visited_dirs = 0usize;
     let mut matched_dirs = 0usize;
@@ -154,7 +158,11 @@ fn discover_windows_native(
         OsString::from_wide(&file_name[..nul]).to_string_lossy().to_string()
     }
 
-    let rules = GarbageRules::new(&learning.base_targets, &learning.custom_targets);
+    let rules = if !request.active_targets.is_empty() {
+        GarbageRules::new(&request.active_targets, &[])
+    } else {
+        GarbageRules::new(&learning.base_targets, &learning.custom_targets)
+    };
     let mut out = Vec::new();
     let mut stack = vec![request.root.clone()];
     let mut visited_dirs = 0usize;
