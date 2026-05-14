@@ -35,6 +35,11 @@ pub struct ScanResult {
 pub struct CleanRequest {
     pub scan_root: PathBuf,
     pub selected_paths: Vec<PathBuf>,
+    /// Known byte size for each path (parallel to selected_paths).
+    /// 0 means unknown — the cleaner will measure with a dir walk.
+    /// Passing the scan-time value avoids a redundant tree walk before deletion.
+    #[serde(default)]
+    pub selected_bytes: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

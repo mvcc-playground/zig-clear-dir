@@ -292,12 +292,12 @@ impl DesktopCleanerUi {
             self.status = "Informe a pasta raiz válida".to_string();
             return;
         }
-        let selected_paths = self
+        let (selected_paths, selected_bytes): (Vec<PathBuf>, Vec<u64>) = self
             .rows
             .iter()
             .filter(|r| r.selected)
-            .map(|r| r.path.clone())
-            .collect::<Vec<_>>();
+            .map(|r| (r.path.clone(), r.bytes))
+            .unzip();
         if selected_paths.is_empty() {
             self.status = "Nenhum item selecionado".to_string();
             return;
@@ -309,7 +309,11 @@ impl DesktopCleanerUi {
         let (tx, rx) = mpsc::channel();
         self.clean_rx = Some(rx);
         std::thread::spawn(move || {
-            let req = CleanRequest { scan_root: PathBuf::from(root), selected_paths };
+            let req = CleanRequest {
+                scan_root: PathBuf::from(root),
+                selected_paths,
+                selected_bytes,
+            };
             let result = app.clean(req).map_err(|e| e.to_string());
             let _ = tx.send(result);
         });
