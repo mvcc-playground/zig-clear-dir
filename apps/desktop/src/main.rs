@@ -2,7 +2,7 @@ use anyhow::Result;
 use application::{CleanerApp, ScanProgressPort, ScanProgressSnapshot};
 use domain::{CleanRequest, CleanResult, ScanMode, ScanResult, default_targets_vec};
 use eframe::egui::{self, Align, Color32, Layout, RichText};
-use platform::{NativeCleaner, NativeScanner, system_excluded_roots};
+use platform::{NativeCleaner, NativeProtectedRoots, NativeScanner};
 use domain::SessionState;
 use preferences::SqliteStore;
 use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
@@ -19,7 +19,8 @@ fn main() -> Result<()> {
     // SqliteStore implements both LearningStorePort and SessionStatePort.
     // Clone the Arc so both ports share the same connection pool.
     let store = Arc::new(SqliteStore::new()?);
-    let app = Arc::new(CleanerApp::new(scanner, cleaner, store.clone(), store));
+    let protected = Arc::new(NativeProtectedRoots);
+    let app = Arc::new(CleanerApp::new(scanner, cleaner, store.clone(), store, protected));
 
     let mut native_options = eframe::NativeOptions::default();
     native_options.viewport = egui::ViewportBuilder::default()
@@ -320,11 +321,12 @@ impl DesktopCleanerUi {
         self.scan_progress_rx = Some(progress_rx);
         let mode = self.selected_mode;
         let pause_flag = self.scan_pause_flag.clone();
-        let excluded = system_excluded_roots();
         std::thread::spawn(move || {
             let reporter = ChannelProgress { tx: progress_tx, paused: pause_flag };
+            // Pass empty excluded_roots — CleanerApp merges system-protected
+            // roots automatically via ProtectedRootsPort. No UI code needed.
             let result = app
-                .scan_with_mode_and_progress(root_path, mode, Some(&reporter), excluded, active_targets)
+                .scan_with_mode_and_progress(root_path, mode, Some(&reporter), Vec::new(), active_targets)
                 .map_err(|e| e.to_string());
             let _ = tx.send(result);
         });

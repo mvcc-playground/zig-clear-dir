@@ -1,5 +1,6 @@
 use anyhow::Result;
 use domain::{AppLearningState, CandidateEntry, CleanRequest, CleanResult, ScanRequest, SessionState};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ScanProgressSnapshot {
@@ -38,4 +39,14 @@ pub trait LearningStorePort: Send + Sync {
 pub trait SessionStatePort: Send + Sync {
     fn load_session(&self) -> Result<SessionState>;
     fn save_session(&self, state: &SessionState) -> Result<()>;
+}
+
+/// Returns the absolute path prefixes that must NEVER be scanned or deleted,
+/// regardless of user configuration. Required at CleanerApp construction —
+/// any caller that omits this gets a compile error, not a silent miss.
+///
+/// Implement this for each platform in the platform crate. For testing,
+/// use an empty implementation explicitly so the omission is deliberate.
+pub trait ProtectedRootsPort: Send + Sync {
+    fn protected_roots(&self) -> Vec<PathBuf>;
 }

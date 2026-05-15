@@ -1,5 +1,5 @@
-use crate::{CleanerPort, LearningStorePort, ScanProgressPort, ScannerPort, SessionStatePort};
-use anyhow::Result;
+use crate::{CleanerPort, LearningStorePort, ProtectedRootsPort, ScanProgressPort, ScannerPort, SessionStatePort};
+use anyhow::{Result, bail};
 use domain::{
     AppLearningState, CleanRequest, CleanResult, GarbageRules, ScanMode, ScanRequest, ScanResult,
     SessionState, default_targets_vec,
@@ -12,6 +12,7 @@ pub struct CleanerApp {
     cleaner: Arc<dyn CleanerPort>,
     learning_store: Arc<dyn LearningStorePort>,
     session_store: Arc<dyn SessionStatePort>,
+    protected_roots: Arc<dyn ProtectedRootsPort>,
 }
 
 impl CleanerApp {
@@ -20,8 +21,9 @@ impl CleanerApp {
         cleaner: Arc<dyn CleanerPort>,
         learning_store: Arc<dyn LearningStorePort>,
         session_store: Arc<dyn SessionStatePort>,
+        protected_roots: Arc<dyn ProtectedRootsPort>,
     ) -> Self {
-        Self { scanner, cleaner, learning_store, session_store }
+        Self { scanner, cleaner, learning_store, session_store, protected_roots }
     }
 
     pub fn load_learning(&self) -> Result<AppLearningState> {
@@ -55,10 +57,20 @@ impl CleanerApp {
             self.learning_store.save(&learning)?;
         }
 
+        // Merge caller-supplied exclusions with system-protected roots.
+        // This happens here — in the application layer — so no ScannerPort
+        // implementation can bypass protection by ignoring excluded_roots.
+        let mut merged_exclusions = self.protected_roots.protected_roots();
+        for r in excluded_roots {
+            if !merged_exclusions.contains(&r) {
+                merged_exclusions.push(r);
+            }
+        }
+
         let request = ScanRequest {
             root,
             mode,
-            excluded_roots,
+            excluded_roots: merged_exclusions,
             active_targets,
             excluded_names: learning.excluded_names.clone(),
         };
@@ -69,6 +81,20 @@ impl CleanerApp {
     }
 
     pub fn clean(&self, request: CleanRequest) -> Result<CleanResult> {
+        // Second line of defense: reject any path inside a protected root
+        // before it reaches the cleaner. Guards against bugs where a path
+        // entered results without going through the scanner's exclusion check.
+        let protected = self.protected_roots.protected_roots();
+        for path in &request.selected_paths {
+            if let Some(root) = protected.iter().find(|r| path.starts_with(r)) {
+                bail!(
+                    "Recusado: '{}' está dentro de '{}', que é uma pasta protegida do sistema. \
+                     Remova-a da seleção antes de continuar.",
+                    path.display(),
+                    root.display()
+                );
+            }
+        }
         let result = self.cleaner.clean(&request)?;
         let mut learning = self.learning_store.load()?;
         learning.stats.runs += 1;
@@ -146,7 +172,7 @@ impl CleanerApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CleanerPort, LearningStorePort, ScannerPort, SessionStatePort};
+    use crate::{CleanerPort, LearningStorePort, ProtectedRootsPort, ScannerPort, SessionStatePort};
     use domain::{CandidateEntry, LearningStats, SessionState};
     use std::path::PathBuf;
     use std::sync::Mutex;
@@ -201,12 +227,24 @@ mod tests {
         }
     }
 
+    struct MockProtectedRoots(Vec<PathBuf>);
+    impl ProtectedRootsPort for MockProtectedRoots {
+        fn protected_roots(&self) -> Vec<PathBuf> {
+            self.0.clone()
+        }
+    }
+
     fn app_with_state(state: AppLearningState) -> CleanerApp {
+        app_with_state_and_roots(state, vec![])
+    }
+
+    fn app_with_state_and_roots(state: AppLearningState, protected: Vec<PathBuf>) -> CleanerApp {
         CleanerApp::new(
             Arc::new(MockScanner),
             Arc::new(MockCleaner),
             Arc::new(MockStore { state: Mutex::new(state) }),
             Arc::new(MockSessionStore { state: Mutex::new(SessionState::default()) }),
+            Arc::new(MockProtectedRoots(protected)),
         )
     }
 
@@ -293,5 +331,76 @@ mod tests {
         .expect("clean");
         let learning = app.load_learning().expect("load");
         assert_eq!(learning.stats.runs, 1);
+    }
+
+    #[test]
+    fn clean_rejects_path_inside_protected_root() {
+        let protected_root = PathBuf::from("/protected/programs");
+        let app = app_with_state_and_roots(
+            AppLearningState::default(),
+            vec![protected_root.clone()],
+        );
+        let result = app.clean(CleanRequest {
+            scan_root: PathBuf::from("/projects"),
+            selected_paths: vec![protected_root.join("cursor").join("node_modules")],
+            selected_bytes: Vec::new(),
+        });
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("protegida"), "error should mention protected: {msg}");
+    }
+
+    #[test]
+    fn clean_allows_path_outside_protected_roots() {
+        let protected_root = PathBuf::from("/protected/programs");
+        let app = app_with_state_and_roots(
+            AppLearningState::default(),
+            vec![protected_root],
+        );
+        let result = app.clean(CleanRequest {
+            scan_root: PathBuf::from("/projects"),
+            selected_paths: vec![PathBuf::from("/projects/my-app/node_modules")],
+            selected_bytes: Vec::new(),
+        });
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn protected_roots_merged_into_scan_request() {
+        // Verifies that CleanerApp injects protected roots into excluded_roots
+        // before the scanner sees the request, even when the caller passes none.
+        struct CapturingScanner(Mutex<Vec<PathBuf>>);
+        impl ScannerPort for CapturingScanner {
+            fn scan(
+                &self,
+                request: &ScanRequest,
+                _learning: &AppLearningState,
+                _progress: Option<&dyn ScanProgressPort>,
+            ) -> Result<Vec<CandidateEntry>> {
+                *self.0.lock().unwrap() = request.excluded_roots.clone();
+                Ok(Vec::new())
+            }
+        }
+
+        let protected = vec![PathBuf::from("/sys/protected")];
+        let captured = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
+        let scanner = Arc::new(CapturingScanner(Mutex::new(Vec::new())));
+        let scanner_ref = scanner.clone();
+
+        let app = CleanerApp::new(
+            scanner_ref,
+            Arc::new(MockCleaner),
+            Arc::new(MockStore { state: Mutex::new(AppLearningState::default()) }),
+            Arc::new(MockSessionStore { state: Mutex::new(SessionState::default()) }),
+            Arc::new(MockProtectedRoots(protected.clone())),
+        );
+
+        let _ = app.scan_with_mode(PathBuf::from("/projects"), ScanMode::Fast);
+        let captured_roots = scanner.0.lock().unwrap().clone();
+        assert!(
+            captured_roots.iter().any(|r| r == &protected[0]),
+            "scanner must receive protected roots even when caller passes none"
+        );
+        drop(captured);
     }
 }

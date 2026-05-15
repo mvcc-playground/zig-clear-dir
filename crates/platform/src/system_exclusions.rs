@@ -15,6 +15,13 @@ fn build_exclusions() -> Vec<PathBuf> {
     if let Ok(v) = std::env::var("SYSTEMROOT") {
         roots.push(PathBuf::from(v));
     }
+    // %WINDIR% fallback for older setups
+    if let Ok(v) = std::env::var("WINDIR") {
+        let p = PathBuf::from(v);
+        if !roots.contains(&p) {
+            roots.push(p);
+        }
+    }
     // %PROGRAMFILES% → C:\Program Files
     if let Ok(v) = std::env::var("PROGRAMFILES") {
         roots.push(PathBuf::from(v));
@@ -23,16 +30,32 @@ fn build_exclusions() -> Vec<PathBuf> {
     if let Ok(v) = std::env::var("PROGRAMFILES(X86)") {
         roots.push(PathBuf::from(v));
     }
-    // %WINDIR% fallback for older setups
-    if let Ok(v) = std::env::var("WINDIR") {
-        let p = PathBuf::from(v);
-        if !roots.contains(&p) {
-            roots.push(p);
-        }
+
+    // User-level application installs and tool data under %LOCALAPPDATA%.
+    // These directories contain app binaries and managed runtimes — their
+    // node_modules / dist / build folders belong to the installed programs,
+    // not to user projects, so deleting them would break those programs.
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        let local = PathBuf::from(local);
+        // User-installed apps (Cursor, Antigravity, VS Code, etc.)
+        roots.push(local.join("Programs"));
+        // mise tool manager — manages runtimes (node, python, ruby …)
+        roots.push(local.join("mise"));
+        // Zed editor data and external agents (Claude Code, Gemini, etc.)
+        roots.push(local.join("Zed"));
+        // Deno runtime and its npm mirror — managed by deno, not the user
+        roots.push(local.join("deno"));
+        // Google Chrome / Chromium application data
+        roots.push(local.join("Google"));
+        // Microsoft Edge application data
+        roots.push(local.join("Microsoft").join("Edge"));
     }
-    // Drive-root names that should never be touched regardless of drive letter.
-    // We add them as bare names so the scanner checks only the last component
-    // when at depth=1 from a drive root. Handled separately in the scanner.
+
+    // %APPDATA% (Roaming) — app configuration and state, never project artifacts
+    if let Ok(v) = std::env::var("APPDATA") {
+        roots.push(PathBuf::from(v));
+    }
+
     roots
 }
 
@@ -90,13 +113,21 @@ pub fn is_system_excluded(path: &std::path::Path, excluded: &[PathBuf]) -> bool 
 }
 
 /// Additionally blocks bare directory names that are OS-protected at any depth.
-/// Used for Windows-specific folder names that appear on any drive.
+/// Used for folder names that appear on any drive regardless of absolute path.
 pub fn is_system_protected_name(name: &str) -> bool {
     #[cfg(windows)]
     {
         matches!(
             name.to_ascii_lowercase().as_str(),
-            "$recycle.bin" | "system volume information" | "recovery" | "windowsapps"
+            // Windows shell / recovery folders
+            "$recycle.bin"
+                | "system volume information"
+                | "recovery"
+                | "windowsapps"
+                // Guard against the user picking a drive root as scan target:
+                // these names at depth-1 are always OS or app infrastructure.
+                | "appdata"
+                | "programdata"
         )
     }
     #[cfg(not(windows))]
