@@ -3,12 +3,38 @@ use std::path::PathBuf;
 /// Returns absolute paths that the scanner must never enter or delete,
 /// regardless of user-configured targets. Each entry is a root prefix:
 /// any directory whose path starts_with one of these is skipped entirely.
+///
+/// Does NOT include AppData — use [`appdata_excluded_roots`] for that.
 pub fn system_excluded_roots() -> Vec<PathBuf> {
-    build_exclusions()
+    build_os_roots()
 }
 
+/// Returns blocked roots derived from AppData using a whitelist strategy:
+/// ALL subdirectories of AppData\Local are blocked EXCEPT the ones in
+/// [`SAFE_APPDATA_LOCAL`]. AppData\Roaming is blocked entirely.
+///
+/// This is safer than a blacklist — any unknown tool installed under
+/// AppData\Local is protected by default without manual updates.
+pub fn appdata_excluded_roots() -> Vec<PathBuf> {
+    build_appdata_roots()
+}
+
+/// AppData\Local subdirectories that are safe to scan.
+/// Everything else under AppData\Local is treated as protected by default.
+pub const SAFE_APPDATA_LOCAL: &[&str] = &[
+    "npm-cache", // npm global cache
+    "bun",       // bun package manager
+    "pub",       // Dart / Flutter pub cache
+    "pnpm",      // pnpm content-addressable store
+    "yarn",      // yarn cache
+    "pip",       // Python pip cache (rare on Windows but safe)
+    "uv",        // Python uv package manager
+    "cargo",     // Rust cargo registry cache
+    "pyenv",     // pyenv version manager
+];
+
 #[cfg(windows)]
-fn build_exclusions() -> Vec<PathBuf> {
+fn build_os_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
 
     // %SYSTEMROOT% → C:\Windows
@@ -31,31 +57,47 @@ fn build_exclusions() -> Vec<PathBuf> {
         roots.push(PathBuf::from(v));
     }
 
-    // User-level application installs and tool data under %LOCALAPPDATA%.
-    // These directories contain app binaries and managed runtimes — their
-    // node_modules / dist / build folders belong to the installed programs,
-    // not to user projects, so deleting them would break those programs.
-    if let Ok(local) = std::env::var("LOCALAPPDATA") {
-        let local = PathBuf::from(local);
-        // User-installed apps (Cursor, Antigravity, VS Code, etc.)
-        roots.push(local.join("Programs"));
-        // mise tool manager — manages runtimes (node, python, ruby …)
-        roots.push(local.join("mise"));
-        // Zed editor data and external agents (Claude Code, Gemini, etc.)
-        roots.push(local.join("Zed"));
-        // Deno runtime and its npm mirror — managed by deno, not the user
-        roots.push(local.join("deno"));
-        // Google Chrome / Chromium application data
-        roots.push(local.join("Google"));
-        // Microsoft Edge application data
-        roots.push(local.join("Microsoft").join("Edge"));
-    }
-
     roots
 }
 
+#[cfg(windows)]
+fn build_appdata_roots() -> Vec<PathBuf> {
+    let mut blocked = Vec::new();
+
+    // AppData\Roaming — app config and state, never project artifacts.
+    if let Ok(v) = std::env::var("APPDATA") {
+        blocked.push(PathBuf::from(v));
+    }
+
+    // AppData\Local — whitelist approach: enumerate children and block
+    // everything that is NOT in SAFE_APPDATA_LOCAL.
+    if let Ok(local_str) = std::env::var("LOCALAPPDATA") {
+        let local = PathBuf::from(&local_str);
+        match std::fs::read_dir(&local) {
+            Ok(entries) => {
+                for entry in entries.flatten() {
+                    if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                        let raw = entry.file_name();
+                        let name = raw.to_string_lossy().to_ascii_lowercase();
+                        let safe = SAFE_APPDATA_LOCAL
+                            .iter()
+                            .any(|s| s.eq_ignore_ascii_case(&name));
+                        if !safe {
+                            blocked.push(entry.path());
+                        }
+                    }
+                }
+            }
+            // If we cannot read AppData\Local at all, block the whole dir.
+            Err(_) => blocked.push(local),
+        }
+    }
+
+    blocked
+}
+
 #[cfg(target_os = "macos")]
-fn build_exclusions() -> Vec<PathBuf> {
+fn build_os_roots() -> Vec<PathBuf> {
     let mut roots = vec![
         PathBuf::from("/System"),
         PathBuf::from("/Library"),
@@ -77,7 +119,7 @@ fn build_exclusions() -> Vec<PathBuf> {
 }
 
 #[cfg(target_os = "linux")]
-fn build_exclusions() -> Vec<PathBuf> {
+fn build_os_roots() -> Vec<PathBuf> {
     vec![
         PathBuf::from("/proc"),
         PathBuf::from("/sys"),
@@ -98,7 +140,13 @@ fn build_exclusions() -> Vec<PathBuf> {
 }
 
 #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
-fn build_exclusions() -> Vec<PathBuf> {
+fn build_os_roots() -> Vec<PathBuf> {
+    Vec::new()
+}
+
+// AppData is a Windows concept — no-op on other platforms.
+#[cfg(not(windows))]
+fn build_appdata_roots() -> Vec<PathBuf> {
     Vec::new()
 }
 
