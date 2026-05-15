@@ -9,6 +9,10 @@ pub struct ScanRequest {
     pub excluded_roots: Vec<PathBuf>,
     #[serde(default)]
     pub active_targets: Vec<String>,
+    /// Folder names to skip entirely — any directory whose name matches
+    /// is not entered and never appears in results.
+    #[serde(default)]
+    pub excluded_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -67,6 +71,9 @@ pub struct AppLearningState {
     pub base_targets: Vec<String>,
     pub custom_targets: Vec<String>,
     pub recent_roots: Vec<PathBuf>,
+    /// Folder NAMES to skip entirely during scan (e.g. "projeto-web").
+    /// Any directory whose name matches is not entered and never appears in results.
+    pub excluded_names: Vec<String>,
     pub stats: LearningStats,
 }
 
@@ -77,6 +84,7 @@ impl Default for AppLearningState {
             base_targets: Vec::new(),
             custom_targets: Vec::new(),
             recent_roots: Vec::new(),
+            excluded_names: Vec::new(),
             stats: LearningStats::default(),
         }
     }

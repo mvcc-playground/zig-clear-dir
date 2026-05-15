@@ -124,6 +124,8 @@ struct DesktopCleanerUi {
     root_path: String,
     targets_list: Vec<TargetEntry>,
     new_target_input: String,
+    excluded_names: Vec<String>,
+    new_exclusion_input: String,
     selected_mode: ScanMode,
 
     // Scan channels & state
@@ -154,7 +156,7 @@ impl DesktopCleanerUi {
     fn new(app: Arc<CleanerApp>) -> Self {
         let session = app.load_session().unwrap_or_default();
 
-        let (targets_list, initial_status) = match app.load_learning() {
+        let (targets_list, excluded_names, initial_status) = match app.load_learning() {
             Ok(learning) => {
                 let disabled: HashSet<String> =
                     session.disabled_targets.iter().cloned().collect();
@@ -164,7 +166,8 @@ impl DesktopCleanerUi {
                         e.enabled = false;
                     }
                 }
-                (list, "Defina a pasta raiz e clique em Iniciar Scan".to_string())
+                let excl = learning.excluded_names.clone();
+                (list, excl, "Defina a pasta raiz e clique em Iniciar Scan".to_string())
             }
             Err(e) => {
                 eprintln!("Aviso: falha ao carregar estado ({e}), usando padrões");
@@ -172,7 +175,7 @@ impl DesktopCleanerUi {
                     .into_iter()
                     .map(|name| TargetEntry { name, is_custom: false, enabled: true })
                     .collect();
-                (defaults, "Estado local inválido, usando configuração padrão".to_string())
+                (defaults, Vec::new(), "Estado local inválido, usando configuração padrão".to_string())
             }
         };
 
@@ -189,6 +192,8 @@ impl DesktopCleanerUi {
             root_path,
             targets_list,
             new_target_input: String::new(),
+            excluded_names,
+            new_exclusion_input: String::new(),
             selected_mode: session.last_scan_mode,
             scan_rx: None,
             scan_progress_rx: None,
@@ -230,6 +235,13 @@ impl DesktopCleanerUi {
             Err(e) => {
                 self.status = format!("Erro ao carregar targets: {e}");
             }
+        }
+    }
+
+    fn rebuild_excluded_names(&mut self) {
+        match self.app.load_learning() {
+            Ok(learning) => self.excluded_names = learning.excluded_names,
+            Err(e) => self.status = format!("Erro ao carregar exclusões: {e}"),
         }
     }
 
@@ -593,6 +605,78 @@ impl DesktopCleanerUi {
                         .small()
                         .color(Color32::from_rgb(180, 130, 0)),
                 );
+            }
+        });
+
+        ui.add_space(8.0);
+
+        // Exclusion list
+        ui.group(|ui| {
+            ui.label(RichText::new("Pastas ignoradas").strong())
+                .on_hover_text("Qualquer pasta com esse nome é ignorada durante o scan");
+
+            ui.horizontal(|ui| {
+                let resp = ui.text_edit_singleline(&mut self.new_exclusion_input);
+                let enter = resp.lost_focus()
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let can_add = !self.new_exclusion_input.trim().is_empty();
+                if (ui.add_enabled(can_add, egui::Button::new("+ Adicionar")).clicked()
+                    || enter)
+                    && can_add
+                {
+                    let name = self.new_exclusion_input.trim().to_string();
+                    match self.app.add_excluded_name(name.clone()) {
+                        Ok(_) => {
+                            self.new_exclusion_input.clear();
+                            self.rebuild_excluded_names();
+                            self.status = format!("'{name}' adicionado às exclusões");
+                        }
+                        Err(e) => self.status = format!("Erro: {e}"),
+                    }
+                }
+            });
+
+            if self.excluded_names.is_empty() {
+                ui.separator();
+                ui.label(
+                    RichText::new("Nenhuma pasta ignorada — tudo será analisado")
+                        .small()
+                        .color(Color32::GRAY),
+                );
+            } else {
+                ui.separator();
+                let mut to_remove: Option<String> = None;
+                egui::ScrollArea::vertical()
+                    .max_height(100.0)
+                    .id_salt("excl_scroll")
+                    .show(ui, |ui| {
+                        for name in &self.excluded_names {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(name)
+                                        .color(Color32::from_rgb(180, 80, 80)),
+                                );
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    if ui
+                                        .small_button("✕")
+                                        .on_hover_text("Remover da lista de exclusões")
+                                        .clicked()
+                                    {
+                                        to_remove = Some(name.clone());
+                                    }
+                                });
+                            });
+                        }
+                    });
+                if let Some(name) = to_remove {
+                    match self.app.remove_excluded_name(&name) {
+                        Ok(_) => {
+                            self.rebuild_excluded_names();
+                            self.status = format!("'{name}' removido das exclusões");
+                        }
+                        Err(e) => self.status = format!("Erro: {e}"),
+                    }
+                }
             }
         });
 

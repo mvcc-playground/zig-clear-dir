@@ -55,7 +55,13 @@ impl CleanerApp {
             self.learning_store.save(&learning)?;
         }
 
-        let request = ScanRequest { root, mode, excluded_roots, active_targets };
+        let request = ScanRequest {
+            root,
+            mode,
+            excluded_roots,
+            active_targets,
+            excluded_names: learning.excluded_names.clone(),
+        };
         let mut candidates = self.scanner.scan(&request, &learning, progress)?;
         candidates.sort_by(|a, b| b.bytes.cmp(&a.bytes));
         let total_bytes = candidates.iter().map(|v| v.bytes).sum();
@@ -95,6 +101,26 @@ impl CleanerApp {
         }
         let rules = GarbageRules::new(&learning.base_targets, &learning.custom_targets);
         Ok(rules.all_targets())
+    }
+
+    pub fn add_excluded_name(&self, name: String) -> Result<Vec<String>> {
+        let mut learning = self.learning_store.load()?;
+        let normalized = name.trim().to_ascii_lowercase();
+        if !normalized.is_empty() && !learning.excluded_names.iter().any(|v| v == &normalized) {
+            learning.excluded_names.push(normalized);
+            learning.excluded_names.sort_unstable();
+            learning.excluded_names.dedup();
+            self.learning_store.save(&learning)?;
+        }
+        Ok(learning.excluded_names.clone())
+    }
+
+    pub fn remove_excluded_name(&self, name: &str) -> Result<Vec<String>> {
+        let mut learning = self.learning_store.load()?;
+        let normalized = name.trim().to_ascii_lowercase();
+        learning.excluded_names.retain(|v| v != &normalized);
+        self.learning_store.save(&learning)?;
+        Ok(learning.excluded_names.clone())
     }
 
     pub fn set_base_targets_csv(&self, csv: String) -> Result<Vec<String>> {
@@ -211,6 +237,7 @@ mod tests {
             base_targets: Vec::new(),
             custom_targets: Vec::new(),
             recent_roots: Vec::new(),
+            excluded_names: Vec::new(),
             stats: LearningStats::default(),
         });
         let _ = app.scan_with_mode(PathBuf::from("C:\\tmp"), ScanMode::Full);
@@ -233,6 +260,26 @@ mod tests {
         assert_eq!(loaded.last_scan_mode, session.last_scan_mode);
         assert_eq!(loaded.disabled_targets, session.disabled_targets);
         assert_eq!(loaded.last_selected_paths, session.last_selected_paths);
+    }
+
+    #[test]
+    fn add_excluded_name_persists_and_normalizes() {
+        let app = app_with_state(AppLearningState::default());
+        let list = app.add_excluded_name("Projeto-Web".into()).expect("add");
+        assert!(list.iter().any(|v| v == "projeto-web"));
+        // idempotent
+        let list2 = app.add_excluded_name("projeto-web".into()).expect("add again");
+        assert_eq!(list2.iter().filter(|v| *v == "projeto-web").count(), 1);
+    }
+
+    #[test]
+    fn remove_excluded_name_removes_it() {
+        let mut state = AppLearningState::default();
+        state.excluded_names = vec!["meu-app".into(), "outro".into()];
+        let app = app_with_state(state);
+        let list = app.remove_excluded_name("meu-app").expect("remove");
+        assert!(!list.iter().any(|v| v == "meu-app"));
+        assert!(list.iter().any(|v| v == "outro"));
     }
 
     #[test]

@@ -82,6 +82,7 @@ fn discover_walkdir(
     } else {
         GarbageRules::new(&learning.base_targets, &learning.custom_targets)
     };
+    let exclusions = GarbageRules::new(&request.excluded_names, &[]);
     let mut out = Vec::new();
     let mut visited_dirs = 0usize;
     let mut matched_dirs = 0usize;
@@ -97,6 +98,10 @@ fn discover_walkdir(
         }
         let path = entry.path();
         if is_system_excluded(path, &request.excluded_roots) {
+            iter.skip_current_dir();
+            continue;
+        }
+        if exclusions.matches_dir_name(path).is_some() {
             iter.skip_current_dir();
             continue;
         }
@@ -161,6 +166,7 @@ fn discover_windows_native(
     } else {
         GarbageRules::new(&learning.base_targets, &learning.custom_targets)
     };
+    let exclusions = GarbageRules::new(&request.excluded_names, &[]);
     let mut out = Vec::new();
     let mut stack = vec![request.root.clone()];
     let mut visited_dirs = 0usize;
@@ -201,12 +207,11 @@ fn discover_windows_native(
                 if is_dir && !is_reparse && !is_system_protected_name(&name) {
                     let mut child = current.clone();
                     child.push(&name);
-                    if let Some(kind) = rules.matches_dir_name(&child) {
+                    if exclusions.matches_dir_name(&child).is_some() {
+                        // skip entirely — don't recurse, don't add to results
+                    } else if let Some(kind) = rules.matches_dir_name(&child) {
                         matched_dirs += 1;
-                        out.push(PendingCandidate {
-                            path: child,
-                            kind,
-                        });
+                        out.push(PendingCandidate { path: child, kind });
                     } else {
                         stack.push(child);
                     }
