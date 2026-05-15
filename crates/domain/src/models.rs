@@ -74,6 +74,9 @@ pub struct AppLearningState {
     /// Folder NAMES to skip entirely during scan (e.g. "projeto-web").
     /// Any directory whose name matches is not entered and never appears in results.
     pub excluded_names: Vec<String>,
+    /// Extra folder names inside AppData\Local that are safe to scan.
+    /// Combined with the built-in whitelist (npm-cache, bun, pub, etc.).
+    pub safe_appdata_names: Vec<String>,
     pub stats: LearningStats,
 }
 
@@ -85,6 +88,7 @@ impl Default for AppLearningState {
             custom_targets: Vec::new(),
             recent_roots: Vec::new(),
             excluded_names: Vec::new(),
+            safe_appdata_names: Vec::new(),
             stats: LearningStats::default(),
         }
     }

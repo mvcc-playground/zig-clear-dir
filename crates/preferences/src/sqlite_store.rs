@@ -35,6 +35,10 @@ const SCHEMA_V1: &str = "
         name TEXT PRIMARY KEY
     );
 
+    CREATE TABLE IF NOT EXISTS safe_appdata_names (
+        name TEXT PRIMARY KEY
+    );
+
     CREATE TABLE IF NOT EXISTS last_selection (
         path TEXT PRIMARY KEY
     );
@@ -112,6 +116,13 @@ impl LearningStorePort for SqliteStore {
                 .collect()
         };
 
+        let safe_appdata_names: Vec<String> = {
+            let mut stmt = conn.prepare("SELECT name FROM safe_appdata_names ORDER BY name")?;
+            stmt.query_map([], |row| row.get(0))?
+                .filter_map(Result::ok)
+                .collect()
+        };
+
         // First run — no targets in DB yet, return built-in defaults.
         let base_targets = if base_targets.is_empty() && custom_targets.is_empty() {
             default_targets_vec()
@@ -125,6 +136,7 @@ impl LearningStorePort for SqliteStore {
             custom_targets,
             recent_roots,
             excluded_names,
+            safe_appdata_names,
             stats: LearningStats { runs, total_removed_bytes },
         })
     }
@@ -165,6 +177,12 @@ impl LearningStorePort for SqliteStore {
         tx.execute("DELETE FROM excluded_names", [])?;
         for name in &state.excluded_names {
             tx.execute("INSERT INTO excluded_names (name) VALUES (?1)", params![name])?;
+        }
+
+        // Rebuild user-managed AppData whitelist.
+        tx.execute("DELETE FROM safe_appdata_names", [])?;
+        for name in &state.safe_appdata_names {
+            tx.execute("INSERT INTO safe_appdata_names (name) VALUES (?1)", params![name])?;
         }
 
         tx.commit()?;
@@ -476,6 +494,37 @@ mod tests {
 
         let loaded = store.load().expect("load");
         assert!(loaded.excluded_names.is_empty());
+    }
+
+    #[test]
+    fn safe_appdata_names_roundtrip() {
+        let dir = tempdir().unwrap();
+        let store = store_in(dir.path());
+
+        let mut state = AppLearningState::default();
+        state.base_targets = default_targets_vec();
+        state.safe_appdata_names = vec!["meu-cache".into(), "ferramenta-xyz".into()];
+        store.save(&state).expect("save");
+
+        let loaded = store.load().expect("load");
+        assert_eq!(loaded.safe_appdata_names, vec!["ferramenta-xyz", "meu-cache"]);
+    }
+
+    #[test]
+    fn safe_appdata_names_cleared_on_empty_save() {
+        let dir = tempdir().unwrap();
+        let store = store_in(dir.path());
+
+        let mut state = AppLearningState::default();
+        state.base_targets = default_targets_vec();
+        state.safe_appdata_names = vec!["meu-cache".into()];
+        store.save(&state).expect("first save");
+
+        state.safe_appdata_names.clear();
+        store.save(&state).expect("second save");
+
+        let loaded = store.load().expect("load");
+        assert!(loaded.safe_appdata_names.is_empty());
     }
 
     #[test]

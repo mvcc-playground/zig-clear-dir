@@ -11,12 +11,12 @@ pub fn system_excluded_roots() -> Vec<PathBuf> {
 
 /// Returns blocked roots derived from AppData using a whitelist strategy:
 /// ALL subdirectories of AppData\Local are blocked EXCEPT the ones in
-/// [`SAFE_APPDATA_LOCAL`]. AppData\Roaming is blocked entirely.
+/// [`SAFE_APPDATA_LOCAL`] and `extra_safe`. AppData\Roaming is blocked entirely.
 ///
-/// This is safer than a blacklist — any unknown tool installed under
-/// AppData\Local is protected by default without manual updates.
-pub fn appdata_excluded_roots() -> Vec<PathBuf> {
-    build_appdata_roots()
+/// `extra_safe` is the user-managed list persisted in the learning store.
+/// This is safer than a blacklist — any unknown tool is protected by default.
+pub fn appdata_excluded_roots(extra_safe: &[String]) -> Vec<PathBuf> {
+    build_appdata_roots(extra_safe)
 }
 
 /// AppData\Local subdirectories that are safe to scan.
@@ -61,7 +61,7 @@ fn build_os_roots() -> Vec<PathBuf> {
 }
 
 #[cfg(windows)]
-fn build_appdata_roots() -> Vec<PathBuf> {
+fn build_appdata_roots(extra_safe: &[String]) -> Vec<PathBuf> {
     let mut blocked = Vec::new();
 
     // AppData\Roaming — app config and state, never project artifacts.
@@ -70,7 +70,7 @@ fn build_appdata_roots() -> Vec<PathBuf> {
     }
 
     // AppData\Local — whitelist approach: enumerate children and block
-    // everything that is NOT in SAFE_APPDATA_LOCAL.
+    // everything not in SAFE_APPDATA_LOCAL or the user's extra_safe list.
     if let Ok(local_str) = std::env::var("LOCALAPPDATA") {
         let local = PathBuf::from(&local_str);
         match std::fs::read_dir(&local) {
@@ -78,10 +78,9 @@ fn build_appdata_roots() -> Vec<PathBuf> {
                 for entry in entries.flatten() {
                     if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                         let raw = entry.file_name();
-                        let name = raw.to_string_lossy().to_ascii_lowercase();
-                        let safe = SAFE_APPDATA_LOCAL
-                            .iter()
-                            .any(|s| s.eq_ignore_ascii_case(&name));
+                        let name = raw.to_string_lossy();
+                        let safe = SAFE_APPDATA_LOCAL.iter().any(|s| s.eq_ignore_ascii_case(&*name))
+                            || extra_safe.iter().any(|s| s.eq_ignore_ascii_case(&*name));
                         if !safe {
                             blocked.push(entry.path());
                         }
@@ -146,7 +145,7 @@ fn build_os_roots() -> Vec<PathBuf> {
 
 // AppData is a Windows concept — no-op on other platforms.
 #[cfg(not(windows))]
-fn build_appdata_roots() -> Vec<PathBuf> {
+fn build_appdata_roots(_extra_safe: &[String]) -> Vec<PathBuf> {
     Vec::new()
 }
 

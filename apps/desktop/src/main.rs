@@ -2,7 +2,7 @@ use anyhow::Result;
 use application::{CleanerApp, ScanProgressPort, ScanProgressSnapshot};
 use domain::{CleanRequest, CleanResult, ScanMode, ScanResult, default_targets_vec};
 use eframe::egui::{self, Align, Color32, Layout, RichText};
-use platform::{NativeCleaner, NativeProtectedRoots, NativeScanner};
+use platform::{NativeCleaner, NativeProtectedRoots, NativeScanner, SAFE_APPDATA_LOCAL};
 use domain::SessionState;
 use preferences::SqliteStore;
 use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
@@ -127,6 +127,8 @@ struct DesktopCleanerUi {
     new_target_input: String,
     excluded_names: Vec<String>,
     new_exclusion_input: String,
+    safe_appdata_names: Vec<String>,
+    new_safe_appdata_input: String,
     selected_mode: ScanMode,
 
     // Scan channels & state
@@ -157,7 +159,7 @@ impl DesktopCleanerUi {
     fn new(app: Arc<CleanerApp>) -> Self {
         let session = app.load_session().unwrap_or_default();
 
-        let (targets_list, excluded_names, initial_status) = match app.load_learning() {
+        let (targets_list, excluded_names, safe_appdata_names, initial_status) = match app.load_learning() {
             Ok(learning) => {
                 let disabled: HashSet<String> =
                     session.disabled_targets.iter().cloned().collect();
@@ -168,7 +170,8 @@ impl DesktopCleanerUi {
                     }
                 }
                 let excl = learning.excluded_names.clone();
-                (list, excl, "Defina a pasta raiz e clique em Iniciar Scan".to_string())
+                let safe = learning.safe_appdata_names.clone();
+                (list, excl, safe, "Defina a pasta raiz e clique em Iniciar Scan".to_string())
             }
             Err(e) => {
                 eprintln!("Aviso: falha ao carregar estado ({e}), usando padrões");
@@ -176,7 +179,7 @@ impl DesktopCleanerUi {
                     .into_iter()
                     .map(|name| TargetEntry { name, is_custom: false, enabled: true })
                     .collect();
-                (defaults, Vec::new(), "Estado local inválido, usando configuração padrão".to_string())
+                (defaults, Vec::new(), Vec::new(), "Estado local inválido, usando configuração padrão".to_string())
             }
         };
 
@@ -195,6 +198,8 @@ impl DesktopCleanerUi {
             new_target_input: String::new(),
             excluded_names,
             new_exclusion_input: String::new(),
+            safe_appdata_names,
+            new_safe_appdata_input: String::new(),
             selected_mode: session.last_scan_mode,
             scan_rx: None,
             scan_progress_rx: None,
@@ -243,6 +248,13 @@ impl DesktopCleanerUi {
         match self.app.load_learning() {
             Ok(learning) => self.excluded_names = learning.excluded_names,
             Err(e) => self.status = format!("Erro ao carregar exclusões: {e}"),
+        }
+    }
+
+    fn rebuild_safe_appdata_names(&mut self) {
+        match self.app.load_learning() {
+            Ok(learning) => self.safe_appdata_names = learning.safe_appdata_names,
+            Err(e) => self.status = format!("Erro ao carregar AppData whitelist: {e}"),
         }
     }
 
@@ -675,6 +687,107 @@ impl DesktopCleanerUi {
                         Ok(_) => {
                             self.rebuild_excluded_names();
                             self.status = format!("'{name}' removido das exclusões");
+                        }
+                        Err(e) => self.status = format!("Erro: {e}"),
+                    }
+                }
+            }
+        });
+
+        ui.add_space(8.0);
+
+        // AppData whitelist
+        ui.group(|ui| {
+            ui.label(RichText::new("AppData permitidas").strong())
+                .on_hover_text(
+                    "Subpastas de AppData\\Local que podem ser escaneadas. \
+                     Tudo o que não estiver aqui é bloqueado por padrão.",
+                );
+
+            // Built-in names (read-only)
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Padrão:").small().color(Color32::GRAY));
+                for name in SAFE_APPDATA_LOCAL {
+                    ui.label(RichText::new(*name).small().monospace().color(Color32::GRAY));
+                }
+            });
+
+            ui.add_space(2.0);
+
+            // Add custom entry
+            ui.horizontal(|ui| {
+                let resp = ui.text_edit_singleline(&mut self.new_safe_appdata_input);
+                let enter = resp.lost_focus()
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let can_add = !self.new_safe_appdata_input.trim().is_empty();
+                if (ui.add_enabled(can_add, egui::Button::new("+ Adicionar")).clicked()
+                    || enter)
+                    && can_add
+                {
+                    let name = self.new_safe_appdata_input.trim().to_string();
+                    match self.app.add_safe_appdata_name(name.clone()) {
+                        Ok(_) => {
+                            self.new_safe_appdata_input.clear();
+                            self.rebuild_safe_appdata_names();
+                            self.status = format!("'{name}' adicionado ao AppData whitelist");
+                        }
+                        Err(e) => self.status = format!("Erro: {e}"),
+                    }
+                }
+                if ui.button("📂 Selecionar pasta").clicked() {
+                    let start = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
+                    if let Some(path) = FileDialog::new().set_directory(&start).pick_folder() {
+                        if let Some(folder_name) = path.file_name() {
+                            let name = folder_name.to_string_lossy().to_string();
+                            match self.app.add_safe_appdata_name(name.clone()) {
+                                Ok(_) => {
+                                    self.rebuild_safe_appdata_names();
+                                    self.status = format!("'{name}' adicionado ao AppData whitelist");
+                                }
+                                Err(e) => self.status = format!("Erro: {e}"),
+                            }
+                        }
+                    }
+                }
+            });
+
+            if self.safe_appdata_names.is_empty() {
+                ui.separator();
+                ui.label(
+                    RichText::new("Nenhuma entrada personalizada — apenas as padrão acima estão permitidas")
+                        .small()
+                        .color(Color32::GRAY),
+                );
+            } else {
+                ui.separator();
+                let mut to_remove: Option<String> = None;
+                egui::ScrollArea::vertical()
+                    .max_height(80.0)
+                    .id_salt("appdata_scroll")
+                    .show(ui, |ui| {
+                        for name in &self.safe_appdata_names {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(name)
+                                        .color(Color32::from_rgb(80, 140, 80)),
+                                );
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    if ui
+                                        .small_button("✕")
+                                        .on_hover_text("Remover do whitelist")
+                                        .clicked()
+                                    {
+                                        to_remove = Some(name.clone());
+                                    }
+                                });
+                            });
+                        }
+                    });
+                if let Some(name) = to_remove {
+                    match self.app.remove_safe_appdata_name(&name) {
+                        Ok(_) => {
+                            self.rebuild_safe_appdata_names();
+                            self.status = format!("'{name}' removido do AppData whitelist");
                         }
                         Err(e) => self.status = format!("Erro: {e}"),
                     }

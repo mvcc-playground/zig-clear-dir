@@ -45,8 +45,12 @@ pub trait SessionStatePort: Send + Sync {
 /// regardless of user configuration. Required at CleanerApp construction —
 /// any caller that omits this gets a compile error, not a silent miss.
 ///
+/// `user_safe_names` extends the built-in whitelist for platform-specific
+/// directories (e.g. AppData\Local on Windows). Pass an empty slice to use
+/// only built-in defaults.
+///
 /// Implement this for each platform in the platform crate. For testing,
 /// use an empty implementation explicitly so the omission is deliberate.
 pub trait ProtectedRootsPort: Send + Sync {
-    fn protected_roots(&self) -> Vec<PathBuf>;
+    fn protected_roots(&self, user_safe_names: &[String]) -> Vec<PathBuf>;
 }

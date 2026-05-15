@@ -8,6 +8,7 @@ default-run = "clear-dev-cache-desktop"
 [dependencies]
 anyhow.workspace = true
 application = { path = "../../crates/application" }
+dirs.workspace = true
 domain = { path = "../../crates/domain" }
 platform = { path = "../../crates/platform" }
 preferences = { path = "../../crates/preferences" }

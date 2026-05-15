@@ -60,7 +60,7 @@ impl CleanerApp {
         // Merge caller-supplied exclusions with system-protected roots.
         // This happens here — in the application layer — so no ScannerPort
         // implementation can bypass protection by ignoring excluded_roots.
-        let mut merged_exclusions = self.protected_roots.protected_roots();
+        let mut merged_exclusions = self.protected_roots.protected_roots(&learning.safe_appdata_names);
         for r in excluded_roots {
             if !merged_exclusions.contains(&r) {
                 merged_exclusions.push(r);
@@ -81,10 +81,14 @@ impl CleanerApp {
     }
 
     pub fn clean(&self, request: CleanRequest) -> Result<CleanResult> {
+        // Load learning once — used for both the protected-roots check and
+        // the stats update, avoiding a double query.
+        let mut learning = self.learning_store.load()?;
+
         // Second line of defense: reject any path inside a protected root
         // before it reaches the cleaner. Guards against bugs where a path
         // entered results without going through the scanner's exclusion check.
-        let protected = self.protected_roots.protected_roots();
+        let protected = self.protected_roots.protected_roots(&learning.safe_appdata_names);
         for path in &request.selected_paths {
             if let Some(root) = protected.iter().find(|r| path.starts_with(r)) {
                 bail!(
@@ -95,12 +99,34 @@ impl CleanerApp {
                 );
             }
         }
+
         let result = self.cleaner.clean(&request)?;
-        let mut learning = self.learning_store.load()?;
         learning.stats.runs += 1;
         learning.stats.total_removed_bytes += result.removed_bytes;
         self.learning_store.save(&learning)?;
         Ok(result)
+    }
+
+    pub fn add_safe_appdata_name(&self, name: String) -> Result<Vec<String>> {
+        let mut learning = self.learning_store.load()?;
+        let normalized = name.trim().to_ascii_lowercase();
+        if !normalized.is_empty()
+            && !learning.safe_appdata_names.iter().any(|v| v == &normalized)
+        {
+            learning.safe_appdata_names.push(normalized);
+            learning.safe_appdata_names.sort_unstable();
+            learning.safe_appdata_names.dedup();
+            self.learning_store.save(&learning)?;
+        }
+        Ok(learning.safe_appdata_names.clone())
+    }
+
+    pub fn remove_safe_appdata_name(&self, name: &str) -> Result<Vec<String>> {
+        let mut learning = self.learning_store.load()?;
+        let normalized = name.trim().to_ascii_lowercase();
+        learning.safe_appdata_names.retain(|v| v != &normalized);
+        self.learning_store.save(&learning)?;
+        Ok(learning.safe_appdata_names.clone())
     }
 
     pub fn remove_target(&self, name: &str) -> Result<Vec<String>> {
@@ -229,7 +255,7 @@ mod tests {
 
     struct MockProtectedRoots(Vec<PathBuf>);
     impl ProtectedRootsPort for MockProtectedRoots {
-        fn protected_roots(&self) -> Vec<PathBuf> {
+        fn protected_roots(&self, _user_safe_names: &[String]) -> Vec<PathBuf> {
             self.0.clone()
         }
     }
@@ -276,6 +302,7 @@ mod tests {
             custom_targets: Vec::new(),
             recent_roots: Vec::new(),
             excluded_names: Vec::new(),
+            safe_appdata_names: Vec::new(),
             stats: LearningStats::default(),
         });
         let _ = app.scan_with_mode(PathBuf::from("C:\\tmp"), ScanMode::Full);

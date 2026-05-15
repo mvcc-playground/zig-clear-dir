@@ -20,9 +20,9 @@ use std::path::PathBuf;
 pub struct NativeProtectedRoots;
 
 impl ProtectedRootsPort for NativeProtectedRoots {
-    fn protected_roots(&self) -> Vec<PathBuf> {
+    fn protected_roots(&self, user_safe_names: &[String]) -> Vec<PathBuf> {
         let mut roots = system_excluded_roots();
-        roots.extend(appdata_excluded_roots());
+        roots.extend(appdata_excluded_roots(user_safe_names));
         roots
     }
 }
