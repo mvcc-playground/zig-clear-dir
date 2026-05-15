@@ -1,8 +1,8 @@
 use crate::{CleanerPort, LearningStorePort, ProtectedRootsPort, ScanProgressPort, ScannerPort, SessionStatePort};
 use anyhow::{Result, bail};
 use domain::{
-    AppLearningState, CleanRequest, CleanResult, GarbageRules, ScanMode, ScanRequest, ScanResult,
-    SessionState, default_targets_vec,
+    AppLearningState, CleanRequest, CleanResult, CustomBlockedRoot, GarbageRules, ScanMode,
+    ScanRequest, ScanResult, SessionState, default_targets_vec,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -60,7 +60,10 @@ impl CleanerApp {
         // Merge caller-supplied exclusions with system-protected roots.
         // This happens here — in the application layer — so no ScannerPort
         // implementation can bypass protection by ignoring excluded_roots.
-        let mut merged_exclusions = self.protected_roots.protected_roots(&learning.safe_appdata_names);
+        let mut merged_exclusions = self.protected_roots.protected_roots(
+            &learning.safe_appdata_names,
+            &learning.custom_blocked_roots,
+        );
         for r in excluded_roots {
             if !merged_exclusions.contains(&r) {
                 merged_exclusions.push(r);
@@ -88,7 +91,10 @@ impl CleanerApp {
         // Second line of defense: reject any path inside a protected root
         // before it reaches the cleaner. Guards against bugs where a path
         // entered results without going through the scanner's exclusion check.
-        let protected = self.protected_roots.protected_roots(&learning.safe_appdata_names);
+        let protected = self.protected_roots.protected_roots(
+            &learning.safe_appdata_names,
+            &learning.custom_blocked_roots,
+        );
         for path in &request.selected_paths {
             if let Some(root) = protected.iter().find(|r| path.starts_with(r)) {
                 bail!(
@@ -127,6 +133,55 @@ impl CleanerApp {
         learning.safe_appdata_names.retain(|v| v != &normalized);
         self.learning_store.save(&learning)?;
         Ok(learning.safe_appdata_names.clone())
+    }
+
+    pub fn add_custom_blocked_root(&self, path: std::path::PathBuf) -> Result<Vec<CustomBlockedRoot>> {
+        let mut learning = self.learning_store.load()?;
+        if !learning.custom_blocked_roots.iter().any(|r| r.path == path) {
+            learning.custom_blocked_roots.push(CustomBlockedRoot { path, allowed_names: Vec::new() });
+            self.learning_store.save(&learning)?;
+        }
+        Ok(learning.custom_blocked_roots)
+    }
+
+    pub fn remove_custom_blocked_root(&self, path: &std::path::Path) -> Result<Vec<CustomBlockedRoot>> {
+        let mut learning = self.learning_store.load()?;
+        learning.custom_blocked_roots.retain(|r| r.path != path);
+        self.learning_store.save(&learning)?;
+        Ok(learning.custom_blocked_roots)
+    }
+
+    pub fn add_allowed_to_blocked_root(
+        &self,
+        root: &std::path::Path,
+        name: String,
+    ) -> Result<Vec<CustomBlockedRoot>> {
+        let mut learning = self.learning_store.load()?;
+        let normalized = name.trim().to_ascii_lowercase();
+        if let Some(entry) = learning.custom_blocked_roots.iter_mut().find(|r| r.path == root) {
+            if !normalized.is_empty()
+                && !entry.allowed_names.iter().any(|n| n == &normalized)
+            {
+                entry.allowed_names.push(normalized);
+                entry.allowed_names.sort_unstable();
+            }
+        }
+        self.learning_store.save(&learning)?;
+        Ok(learning.custom_blocked_roots)
+    }
+
+    pub fn remove_allowed_from_blocked_root(
+        &self,
+        root: &std::path::Path,
+        name: &str,
+    ) -> Result<Vec<CustomBlockedRoot>> {
+        let mut learning = self.learning_store.load()?;
+        let normalized = name.trim().to_ascii_lowercase();
+        if let Some(entry) = learning.custom_blocked_roots.iter_mut().find(|r| r.path == root) {
+            entry.allowed_names.retain(|n| n != &normalized);
+        }
+        self.learning_store.save(&learning)?;
+        Ok(learning.custom_blocked_roots)
     }
 
     pub fn remove_target(&self, name: &str) -> Result<Vec<String>> {
@@ -255,7 +310,7 @@ mod tests {
 
     struct MockProtectedRoots(Vec<PathBuf>);
     impl ProtectedRootsPort for MockProtectedRoots {
-        fn protected_roots(&self, _user_safe_names: &[String]) -> Vec<PathBuf> {
+        fn protected_roots(&self, _user_safe_names: &[String], _custom_blocked: &[CustomBlockedRoot]) -> Vec<PathBuf> {
             self.0.clone()
         }
     }
@@ -303,6 +358,7 @@ mod tests {
             recent_roots: Vec::new(),
             excluded_names: Vec::new(),
             safe_appdata_names: Vec::new(),
+            custom_blocked_roots: Vec::new(),
             stats: LearningStats::default(),
         });
         let _ = app.scan_with_mode(PathBuf::from("C:\\tmp"), ScanMode::Full);

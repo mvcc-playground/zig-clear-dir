@@ -77,6 +77,9 @@ pub struct AppLearningState {
     /// Extra folder names inside AppData\Local that are safe to scan.
     /// Combined with the built-in whitelist (npm-cache, bun, pub, etc.).
     pub safe_appdata_names: Vec<String>,
+    /// User-defined additional blocked roots, each with an optional whitelist
+    /// of sub-folder names that are allowed through.
+    pub custom_blocked_roots: Vec<CustomBlockedRoot>,
     pub stats: LearningStats,
 }
 
@@ -89,9 +92,19 @@ impl Default for AppLearningState {
             recent_roots: Vec::new(),
             excluded_names: Vec::new(),
             safe_appdata_names: Vec::new(),
+            custom_blocked_roots: Vec::new(),
             stats: LearningStats::default(),
         }
     }
+}
+
+/// A user-defined folder that is blocked during scan but with specific
+/// sub-folder names that are allowed through (whitelist).
+/// If `allowed_names` is empty, the entire folder is blocked with no exceptions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CustomBlockedRoot {
+    pub path: PathBuf,
+    pub allowed_names: Vec<String>,
 }
 
 /// UI session state persisted across restarts.

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use application::{CleanerApp, ScanProgressPort, ScanProgressSnapshot};
-use domain::{CleanRequest, CleanResult, ScanMode, ScanResult, default_targets_vec};
+use domain::{CleanRequest, CleanResult, CustomBlockedRoot, ScanMode, ScanResult, default_targets_vec};
 use eframe::egui::{self, Align, Color32, Layout, RichText};
 use platform::{NativeCleaner, NativeProtectedRoots, NativeScanner, SAFE_APPDATA_LOCAL};
 use domain::SessionState;
@@ -129,6 +129,8 @@ struct DesktopCleanerUi {
     new_exclusion_input: String,
     safe_appdata_names: Vec<String>,
     new_safe_appdata_input: String,
+    custom_blocked_roots: Vec<CustomBlockedRoot>,
+    new_blocked_root_inputs: std::collections::HashMap<PathBuf, String>,
     selected_mode: ScanMode,
 
     // Scan channels & state
@@ -159,7 +161,7 @@ impl DesktopCleanerUi {
     fn new(app: Arc<CleanerApp>) -> Self {
         let session = app.load_session().unwrap_or_default();
 
-        let (targets_list, excluded_names, safe_appdata_names, initial_status) = match app.load_learning() {
+        let (targets_list, excluded_names, safe_appdata_names, custom_blocked_roots, initial_status) = match app.load_learning() {
             Ok(learning) => {
                 let disabled: HashSet<String> =
                     session.disabled_targets.iter().cloned().collect();
@@ -171,7 +173,8 @@ impl DesktopCleanerUi {
                 }
                 let excl = learning.excluded_names.clone();
                 let safe = learning.safe_appdata_names.clone();
-                (list, excl, safe, "Defina a pasta raiz e clique em Iniciar Scan".to_string())
+                let blocked = learning.custom_blocked_roots.clone();
+                (list, excl, safe, blocked, "Defina a pasta raiz e clique em Iniciar Scan".to_string())
             }
             Err(e) => {
                 eprintln!("Aviso: falha ao carregar estado ({e}), usando padrões");
@@ -179,7 +182,7 @@ impl DesktopCleanerUi {
                     .into_iter()
                     .map(|name| TargetEntry { name, is_custom: false, enabled: true })
                     .collect();
-                (defaults, Vec::new(), Vec::new(), "Estado local inválido, usando configuração padrão".to_string())
+                (defaults, Vec::new(), Vec::new(), Vec::new(), "Estado local inválido, usando configuração padrão".to_string())
             }
         };
 
@@ -200,6 +203,8 @@ impl DesktopCleanerUi {
             new_exclusion_input: String::new(),
             safe_appdata_names,
             new_safe_appdata_input: String::new(),
+            custom_blocked_roots,
+            new_blocked_root_inputs: std::collections::HashMap::new(),
             selected_mode: session.last_scan_mode,
             scan_rx: None,
             scan_progress_rx: None,
@@ -255,6 +260,13 @@ impl DesktopCleanerUi {
         match self.app.load_learning() {
             Ok(learning) => self.safe_appdata_names = learning.safe_appdata_names,
             Err(e) => self.status = format!("Erro ao carregar AppData whitelist: {e}"),
+        }
+    }
+
+    fn rebuild_custom_blocked_roots(&mut self) {
+        match self.app.load_learning() {
+            Ok(learning) => self.custom_blocked_roots = learning.custom_blocked_roots,
+            Err(e) => self.status = format!("Erro ao carregar pastas restritas: {e}"),
         }
     }
 
@@ -696,101 +708,166 @@ impl DesktopCleanerUi {
 
         ui.add_space(8.0);
 
-        // AppData whitelist
+        // Unified "Pastas restritas" section
         ui.group(|ui| {
-            ui.label(RichText::new("AppData permitidas").strong())
-                .on_hover_text(
-                    "Subpastas de AppData\\Local que podem ser escaneadas. \
-                     Tudo o que não estiver aqui é bloqueado por padrão.",
-                );
-
-            // Built-in names (read-only)
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("Padrão:").small().color(Color32::GRAY));
-                for name in SAFE_APPDATA_LOCAL {
-                    ui.label(RichText::new(*name).small().monospace().color(Color32::GRAY));
-                }
-            });
-
-            ui.add_space(2.0);
-
-            // Add custom entry
             ui.horizontal(|ui| {
-                let resp = ui.text_edit_singleline(&mut self.new_safe_appdata_input);
-                let enter = resp.lost_focus()
-                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                let can_add = !self.new_safe_appdata_input.trim().is_empty();
-                if (ui.add_enabled(can_add, egui::Button::new("+ Adicionar")).clicked()
-                    || enter)
-                    && can_add
-                {
-                    let name = self.new_safe_appdata_input.trim().to_string();
-                    match self.app.add_safe_appdata_name(name.clone()) {
-                        Ok(_) => {
-                            self.new_safe_appdata_input.clear();
-                            self.rebuild_safe_appdata_names();
-                            self.status = format!("'{name}' adicionado ao AppData whitelist");
-                        }
-                        Err(e) => self.status = format!("Erro: {e}"),
-                    }
-                }
-                if ui.button("📂 Selecionar pasta").clicked() {
-                    let start = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
-                    if let Some(path) = FileDialog::new().set_directory(&start).pick_folder() {
-                        if let Some(folder_name) = path.file_name() {
-                            let name = folder_name.to_string_lossy().to_string();
-                            match self.app.add_safe_appdata_name(name.clone()) {
+                ui.label(RichText::new("Pastas restritas").strong())
+                    .on_hover_text(
+                        "Pastas bloqueadas durante o scan. Podem ter exceções: \
+                         sub-pastas específicas que são permitidas.",
+                    );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.button("📂 + Bloquear pasta").on_hover_text("Adicionar nova pasta bloqueada").clicked() {
+                        if let Some(path) = FileDialog::new().pick_folder() {
+                            match self.app.add_custom_blocked_root(path.clone()) {
                                 Ok(_) => {
-                                    self.rebuild_safe_appdata_names();
-                                    self.status = format!("'{name}' adicionado ao AppData whitelist");
+                                    self.rebuild_custom_blocked_roots();
+                                    self.status = format!("'{}' adicionado às restrições", path.display());
                                 }
                                 Err(e) => self.status = format!("Erro: {e}"),
                             }
                         }
                     }
-                }
+                });
             });
 
-            if self.safe_appdata_names.is_empty() {
-                ui.separator();
-                ui.label(
-                    RichText::new("Nenhuma entrada personalizada — apenas as padrão acima estão permitidas")
-                        .small()
-                        .color(Color32::GRAY),
-                );
-            } else {
-                ui.separator();
-                let mut to_remove: Option<String> = None;
-                egui::ScrollArea::vertical()
-                    .max_height(80.0)
-                    .id_salt("appdata_scroll")
-                    .show(ui, |ui| {
+            ui.separator();
+
+            // ── AppData\Local (system-defined, always shown on Windows) ──────
+            #[cfg(windows)]
+            {
+                egui::CollapsingHeader::new(
+                    RichText::new("AppData\\Local  [sistema]").color(Color32::from_rgb(80, 100, 140))
+                )
+                .id_salt("appdata_local_header")
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new("Padrão:").small().color(Color32::GRAY));
+                        for name in SAFE_APPDATA_LOCAL {
+                            ui.label(RichText::new(*name).small().monospace().color(Color32::GRAY));
+                        }
+                    });
+                    if !self.safe_appdata_names.is_empty() {
+                        ui.add_space(2.0);
+                        let mut to_remove: Option<String> = None;
                         for name in &self.safe_appdata_names {
                             ui.horizontal(|ui| {
-                                ui.label(
-                                    RichText::new(name)
-                                        .color(Color32::from_rgb(80, 140, 80)),
-                                );
+                                ui.label(RichText::new(name).color(Color32::from_rgb(80, 140, 80)));
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    if ui
-                                        .small_button("✕")
-                                        .on_hover_text("Remover do whitelist")
-                                        .clicked()
-                                    {
+                                    if ui.small_button("✕").on_hover_text("Remover da lista").clicked() {
                                         to_remove = Some(name.clone());
                                     }
                                 });
                             });
                         }
-                    });
-                if let Some(name) = to_remove {
-                    match self.app.remove_safe_appdata_name(&name) {
-                        Ok(_) => {
-                            self.rebuild_safe_appdata_names();
-                            self.status = format!("'{name}' removido do AppData whitelist");
+                        if let Some(name) = to_remove {
+                            match self.app.remove_safe_appdata_name(&name) {
+                                Ok(_) => { self.rebuild_safe_appdata_names(); self.status = format!("'{name}' removido"); }
+                                Err(e) => self.status = format!("Erro: {e}"),
+                            }
                         }
-                        Err(e) => self.status = format!("Erro: {e}"),
                     }
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        let resp = ui.text_edit_singleline(&mut self.new_safe_appdata_input);
+                        let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        let can_add = !self.new_safe_appdata_input.trim().is_empty();
+                        if (ui.add_enabled(can_add, egui::Button::new("+ Permitir")).clicked() || enter) && can_add {
+                            let name = self.new_safe_appdata_input.trim().to_string();
+                            match self.app.add_safe_appdata_name(name.clone()) {
+                                Ok(_) => { self.new_safe_appdata_input.clear(); self.rebuild_safe_appdata_names(); self.status = format!("'{name}' permitido"); }
+                                Err(e) => self.status = format!("Erro: {e}"),
+                            }
+                        }
+                        if ui.small_button("📂").on_hover_text("Selecionar sub-pasta de AppData\\Local").clicked() {
+                            let start = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
+                            if let Some(path) = FileDialog::new().set_directory(&start).pick_folder() {
+                                if let Some(folder_name) = path.file_name() {
+                                    let name = folder_name.to_string_lossy().to_string();
+                                    match self.app.add_safe_appdata_name(name.clone()) {
+                                        Ok(_) => { self.rebuild_safe_appdata_names(); self.status = format!("'{name}' permitido"); }
+                                        Err(e) => self.status = format!("Erro: {e}"),
+                                    }
+                                }
+                            }
+                        }
+                    });
+                });
+            }
+
+            // ── User-defined custom blocked roots ──────────────────────────
+            let mut root_to_remove: Option<PathBuf> = None;
+            let mut allowed_to_remove: Option<(PathBuf, String)> = None;
+            let mut allowed_to_add: Option<(PathBuf, String)> = None;
+
+            let roots_snapshot = self.custom_blocked_roots.clone();
+            for root in &roots_snapshot {
+                let path_str = root.path.display().to_string();
+                egui::CollapsingHeader::new(
+                    RichText::new(&path_str).color(Color32::from_rgb(160, 80, 40))
+                )
+                .id_salt(format!("cbr_{path_str}"))
+                .show(ui, |ui| {
+                    if root.allowed_names.is_empty() {
+                        ui.label(
+                            RichText::new("Tudo bloqueado (sem exceções)")
+                                .small()
+                                .color(Color32::GRAY),
+                        );
+                    } else {
+                        for name in &root.allowed_names {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(name).color(Color32::from_rgb(80, 140, 80)));
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    if ui.small_button("✕").on_hover_text("Remover exceção").clicked() {
+                                        allowed_to_remove = Some((root.path.clone(), name.clone()));
+                                    }
+                                });
+                            });
+                        }
+                    }
+                    ui.add_space(2.0);
+                    let input = self.new_blocked_root_inputs.entry(root.path.clone()).or_default();
+                    ui.horizontal(|ui| {
+                        let resp = ui.text_edit_singleline(input);
+                        let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        let can_add = !input.trim().is_empty();
+                        if (ui.add_enabled(can_add, egui::Button::new("+ Permitir")).clicked() || enter) && can_add {
+                            allowed_to_add = Some((root.path.clone(), input.trim().to_string()));
+                        }
+                        if ui.small_button("📂").on_hover_text("Selecionar sub-pasta para permitir").clicked() {
+                            if let Some(sub) = FileDialog::new().set_directory(&root.path).pick_folder() {
+                                if let Some(n) = sub.file_name() {
+                                    allowed_to_add = Some((root.path.clone(), n.to_string_lossy().to_string()));
+                                }
+                            }
+                        }
+                    });
+                    ui.add_space(2.0);
+                    if ui.small_button("🗑 Remover esta restrição").clicked() {
+                        root_to_remove = Some(root.path.clone());
+                    }
+                });
+            }
+
+            // Apply deferred mutations
+            if let Some(path) = root_to_remove {
+                match self.app.remove_custom_blocked_root(&path) {
+                    Ok(_) => { self.rebuild_custom_blocked_roots(); self.status = format!("Restrição '{}' removida", path.display()); }
+                    Err(e) => self.status = format!("Erro: {e}"),
+                }
+            }
+            if let Some((root, name)) = allowed_to_remove {
+                match self.app.remove_allowed_from_blocked_root(&root, &name) {
+                    Ok(_) => { self.rebuild_custom_blocked_roots(); self.status = format!("'{name}' removido das exceções"); }
+                    Err(e) => self.status = format!("Erro: {e}"),
+                }
+            }
+            if let Some((root, name)) = allowed_to_add {
+                self.new_blocked_root_inputs.remove(&root);
+                match self.app.add_allowed_to_blocked_root(&root, name.clone()) {
+                    Ok(_) => { self.rebuild_custom_blocked_roots(); self.status = format!("'{name}' permitido em '{}'", root.display()); }
+                    Err(e) => self.status = format!("Erro: {e}"),
                 }
             }
         });

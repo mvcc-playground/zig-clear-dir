@@ -1,5 +1,5 @@
 use anyhow::Result;
-use domain::{AppLearningState, CandidateEntry, CleanRequest, CleanResult, ScanRequest, SessionState};
+use domain::{AppLearningState, CandidateEntry, CleanRequest, CleanResult, CustomBlockedRoot, ScanRequest, SessionState};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy)]
@@ -49,8 +49,15 @@ pub trait SessionStatePort: Send + Sync {
 /// directories (e.g. AppData\Local on Windows). Pass an empty slice to use
 /// only built-in defaults.
 ///
+/// `custom_blocked_roots` are user-defined folders that are blocked entirely,
+/// optionally with a per-root whitelist of allowed sub-folder names.
+///
 /// Implement this for each platform in the platform crate. For testing,
 /// use an empty implementation explicitly so the omission is deliberate.
 pub trait ProtectedRootsPort: Send + Sync {
-    fn protected_roots(&self, user_safe_names: &[String]) -> Vec<PathBuf>;
+    fn protected_roots(
+        &self,
+        user_safe_names: &[String],
+        custom_blocked_roots: &[CustomBlockedRoot],
+    ) -> Vec<PathBuf>;
 }

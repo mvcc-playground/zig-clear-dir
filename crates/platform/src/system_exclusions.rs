@@ -1,3 +1,4 @@
+use domain::CustomBlockedRoot;
 use std::path::PathBuf;
 
 /// Returns absolute paths that the scanner must never enter or delete,
@@ -147,6 +148,41 @@ fn build_os_roots() -> Vec<PathBuf> {
 #[cfg(not(windows))]
 fn build_appdata_roots(_extra_safe: &[String]) -> Vec<PathBuf> {
     Vec::new()
+}
+
+/// Converts user-defined [`CustomBlockedRoot`] entries into a flat list of
+/// absolute paths that the scanner must not enter.
+///
+/// - If a root has no `allowed_names`: the root path itself is blocked.
+/// - If a root has `allowed_names`: its children are enumerated and every
+///   child NOT in the whitelist is blocked (same strategy as AppData\Local).
+pub fn custom_blocked_exclusions(roots: &[CustomBlockedRoot]) -> Vec<PathBuf> {
+    let mut blocked = Vec::new();
+    for root in roots {
+        if root.allowed_names.is_empty() {
+            blocked.push(root.path.clone());
+        } else {
+            match std::fs::read_dir(&root.path) {
+                Ok(entries) => {
+                    for entry in entries.flatten() {
+                        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                            let raw = entry.file_name();
+                            let name = raw.to_string_lossy();
+                            if !root
+                                .allowed_names
+                                .iter()
+                                .any(|a| a.eq_ignore_ascii_case(&*name))
+                            {
+                                blocked.push(entry.path());
+                            }
+                        }
+                    }
+                }
+                Err(_) => blocked.push(root.path.clone()),
+            }
+        }
+    }
+    blocked
 }
 
 /// Returns true if `path` starts with any of the excluded roots.

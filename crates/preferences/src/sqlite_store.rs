@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use application::{LearningStorePort, SessionStatePort};
-use domain::{AppLearningState, LearningStats, ScanMode, SessionState, default_targets_vec};
+use domain::{AppLearningState, CustomBlockedRoot, LearningStats, ScanMode, SessionState, default_targets_vec};
 use rusqlite::{Connection, params};
 use std::path::Path;
 use std::sync::Mutex;
@@ -37,6 +37,16 @@ const SCHEMA_V1: &str = "
 
     CREATE TABLE IF NOT EXISTS safe_appdata_names (
         name TEXT PRIMARY KEY
+    );
+
+    CREATE TABLE IF NOT EXISTS custom_blocked_roots (
+        path TEXT PRIMARY KEY
+    );
+
+    CREATE TABLE IF NOT EXISTS custom_blocked_root_allowed (
+        path         TEXT NOT NULL,
+        allowed_name TEXT NOT NULL,
+        PRIMARY KEY (path, allowed_name)
     );
 
     CREATE TABLE IF NOT EXISTS last_selection (
@@ -123,6 +133,35 @@ impl LearningStorePort for SqliteStore {
                 .collect()
         };
 
+        // Load custom blocked roots — one row per root path, then join allowed names.
+        let custom_blocked_roots: Vec<CustomBlockedRoot> = {
+            let paths: Vec<String> = {
+                let mut stmt = conn.prepare(
+                    "SELECT path FROM custom_blocked_roots ORDER BY path",
+                )?;
+                stmt.query_map([], |row| row.get(0))?
+                    .filter_map(Result::ok)
+                    .collect()
+            };
+            let mut out = Vec::with_capacity(paths.len());
+            for path_str in paths {
+                let allowed_names: Vec<String> = {
+                    let mut stmt = conn.prepare(
+                        "SELECT allowed_name FROM custom_blocked_root_allowed \
+                         WHERE path=?1 ORDER BY allowed_name",
+                    )?;
+                    stmt.query_map(rusqlite::params![&path_str], |row| row.get(0))?
+                        .filter_map(Result::ok)
+                        .collect()
+                };
+                out.push(CustomBlockedRoot {
+                    path: std::path::PathBuf::from(path_str),
+                    allowed_names,
+                });
+            }
+            out
+        };
+
         // First run — no targets in DB yet, return built-in defaults.
         let base_targets = if base_targets.is_empty() && custom_targets.is_empty() {
             default_targets_vec()
@@ -137,6 +176,7 @@ impl LearningStorePort for SqliteStore {
             recent_roots,
             excluded_names,
             safe_appdata_names,
+            custom_blocked_roots,
             stats: LearningStats { runs, total_removed_bytes },
         })
     }
@@ -183,6 +223,23 @@ impl LearningStorePort for SqliteStore {
         tx.execute("DELETE FROM safe_appdata_names", [])?;
         for name in &state.safe_appdata_names {
             tx.execute("INSERT INTO safe_appdata_names (name) VALUES (?1)", params![name])?;
+        }
+
+        // Rebuild custom blocked roots and their per-root allowed names.
+        tx.execute("DELETE FROM custom_blocked_root_allowed", [])?;
+        tx.execute("DELETE FROM custom_blocked_roots", [])?;
+        for root in &state.custom_blocked_roots {
+            let path_str = root.path.to_string_lossy();
+            tx.execute(
+                "INSERT INTO custom_blocked_roots (path) VALUES (?1)",
+                params![path_str.as_ref()],
+            )?;
+            for name in &root.allowed_names {
+                tx.execute(
+                    "INSERT INTO custom_blocked_root_allowed (path, allowed_name) VALUES (?1, ?2)",
+                    params![path_str.as_ref(), name],
+                )?;
+            }
         }
 
         tx.commit()?;
@@ -295,7 +352,7 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use domain::{AppLearningState, LearningStats, ScanMode, SessionState};
+    use domain::{AppLearningState, CustomBlockedRoot, LearningStats, ScanMode, SessionState};
     use std::path::PathBuf;
     use tempfile::tempdir;
 
@@ -525,6 +582,53 @@ mod tests {
 
         let loaded = store.load().expect("load");
         assert!(loaded.safe_appdata_names.is_empty());
+    }
+
+    #[test]
+    fn custom_blocked_roots_roundtrip() {
+        let dir = tempdir().unwrap();
+        let store = store_in(dir.path());
+
+        let mut state = AppLearningState::default();
+        state.base_targets = default_targets_vec();
+        state.custom_blocked_roots = vec![
+            CustomBlockedRoot {
+                path: PathBuf::from("/home/user/tools"),
+                allowed_names: vec!["my-tool".into(), "other".into()],
+            },
+            CustomBlockedRoot {
+                path: PathBuf::from("/home/user/vault"),
+                allowed_names: vec![],
+            },
+        ];
+        store.save(&state).expect("save");
+
+        let loaded = store.load().expect("load");
+        assert_eq!(loaded.custom_blocked_roots.len(), 2);
+        let tools = loaded.custom_blocked_roots.iter().find(|r| r.path == PathBuf::from("/home/user/tools")).unwrap();
+        assert_eq!(tools.allowed_names, vec!["my-tool", "other"]);
+        let vault = loaded.custom_blocked_roots.iter().find(|r| r.path == PathBuf::from("/home/user/vault")).unwrap();
+        assert!(vault.allowed_names.is_empty());
+    }
+
+    #[test]
+    fn custom_blocked_roots_cleared_on_empty_save() {
+        let dir = tempdir().unwrap();
+        let store = store_in(dir.path());
+
+        let mut state = AppLearningState::default();
+        state.base_targets = default_targets_vec();
+        state.custom_blocked_roots = vec![CustomBlockedRoot {
+            path: PathBuf::from("/some/path"),
+            allowed_names: vec!["sub".into()],
+        }];
+        store.save(&state).expect("first save");
+
+        state.custom_blocked_roots.clear();
+        store.save(&state).expect("second save");
+
+        let loaded = store.load().expect("load");
+        assert!(loaded.custom_blocked_roots.is_empty());
     }
 
     #[test]
