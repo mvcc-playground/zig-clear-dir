@@ -51,11 +51,6 @@ fn build_exclusions() -> Vec<PathBuf> {
         roots.push(local.join("Microsoft").join("Edge"));
     }
 
-    // %APPDATA% (Roaming) — app configuration and state, never project artifacts
-    if let Ok(v) = std::env::var("APPDATA") {
-        roots.push(PathBuf::from(v));
-    }
-
     roots
 }
 
@@ -119,15 +114,7 @@ pub fn is_system_protected_name(name: &str) -> bool {
     {
         matches!(
             name.to_ascii_lowercase().as_str(),
-            // Windows shell / recovery folders
-            "$recycle.bin"
-                | "system volume information"
-                | "recovery"
-                | "windowsapps"
-                // Guard against the user picking a drive root as scan target:
-                // these names at depth-1 are always OS or app infrastructure.
-                | "appdata"
-                | "programdata"
+            "$recycle.bin" | "system volume information" | "recovery" | "windowsapps" | "programdata"
         )
     }
     #[cfg(not(windows))]
